@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>连接二维码</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+</head>
+<body class="bg-black text-green-400 min-h-screen flex items-center justify-center p-6">
+    <div class="max-w-xl w-full bg-zinc-900 border border-green-500/40 rounded-2xl p-8 text-center space-y-6">
+        <h1 class="text-2xl font-semibold">眼镜端连接二维码</h1>
+        <p class="text-sm text-green-300/80">扫这个码，把眼镜端连接到当前本地模拟服务。</p>
+        <div class="bg-white rounded-xl p-4 inline-block">
+            <canvas id="qrCanvas"></canvas>
+        </div>
+        <pre id="configText" class="text-left text-xs whitespace-pre-wrap break-all bg-zinc-950 border border-green-500/20 rounded-xl p-4"></pre>
+    </div>
+
+    <script>
+        async function init() {
+            const params = new URLSearchParams(window.location.search);
+            const host = params.get('host');
+            const query = host ? `?host=${encodeURIComponent(host)}` : '';
+            const response = await fetch(`/api/mock/connection-config${query}`);
+            const config = await response.json();
+            const raw = JSON.stringify(config, null, 2);
+            document.getElementById('configText').textContent = raw;
+            QRCode.toCanvas(document.getElementById('qrCanvas'), JSON.stringify(config), {
+                width: 320,
+                margin: 2,
+            });
+        }
+
+        init().catch((error) => {
+            document.getElementById('configText').textContent = `生成失败: ${error}`;
+        });
+    </script>
+</body>
+</html>

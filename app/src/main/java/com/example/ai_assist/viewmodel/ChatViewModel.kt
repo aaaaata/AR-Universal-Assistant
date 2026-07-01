@@ -4,10 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.ai_assist.model.AnalyzeResponse
+import com.example.ai_assist.model.ConnectionConfig
 import com.example.ai_assist.repository.ChatRepository
 import com.example.ai_assist.service.RayNeoDeviceManager
 import com.example.ai_assist.utils.MahjongMapper
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -33,6 +33,7 @@ class ChatViewModel(
     }
     
     private var sessionId = UUID.randomUUID().toString()
+    private var hasStartedSession = false
 
     init {
         deviceManager.listener = object : RayNeoDeviceManager.InteractionListener {
@@ -53,24 +54,41 @@ class ChatViewModel(
         deviceManager.takePhoto()
     }
 
+    fun updateConnection(config: ConnectionConfig) {
+        repository.updateConnection(config)
+        hasStartedSession = false
+    }
+
     suspend fun startNewSession(): Boolean {
         sessionId = UUID.randomUUID().toString()
-        return repository.startSession(sessionId)
+        val started = repository.startSession(sessionId)
+        hasStartedSession = started
+        return started
+    }
+
+    suspend fun ensureSessionStarted(): Boolean {
+        if (hasStartedSession) {
+            return true
+        }
+        return startNewSession()
     }
 
     fun endCurrentSession() {
         val currentId = sessionId
         viewModelScope.launch {
             repository.endSession(currentId)
+            hasStartedSession = false
         }
     }
     
-    fun uploadPhoto(file: File) {
+    fun uploadPhoto(file: File, onComplete: (() -> Unit)? = null) {
         viewModelScope.launch {
             try {
                 repository.analyzeImage(file, sessionId)
             } catch (e: Exception) {
                 e.printStackTrace()
+            } finally {
+                onComplete?.invoke()
             }
         }
     }

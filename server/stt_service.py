@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -13,31 +14,54 @@ except ImportError:
 
 class STTService:
     def __init__(self, model="base", language="zh"):
-        logger.info(f"Initializing STT Service (faster-whisper) with model='{model}', language='{language}'...")
-        if WhisperModel and BatchedInferencePipeline:
-            try:
-                # Initialize WhisperModel with CPU and int8 quantization
-                # User requested: CPU version, int8
-                self._model = WhisperModel(model, device="cpu", compute_type="int8")
-                
-                # Wrap with BatchedInferencePipeline for batch_size=8
-                self.batched_model = BatchedInferencePipeline(model=self._model)
-                self.language = language
-                
-                logger.info("STT Service initialized successfully with BatchedInferencePipeline.")
-            except Exception as e:
-                logger.error(f"Failed to initialize STT Service: {e}")
-                self.batched_model = None
-        else:
-            self.batched_model = None
+        self.model_name = model
+        self.language = language
+        self._model = None
+        self.batched_model = None
+        self._init_lock = threading.Lock()
+        self._init_attempted = False
+        logger.info(
+            "STT Service created in lazy mode (model='%s', language='%s').",
+            model,
+            language,
+        )
+
+    def _ensure_initialized(self):
+        if self.batched_model is not None:
+            return
+        if self._init_attempted and self.batched_model is None:
+            raise RuntimeError("STT Service not available (previous initialization failed).")
+
+        with self._init_lock:
+            if self.batched_model is not None:
+                return
+            if self._init_attempted and self.batched_model is None:
+                raise RuntimeError("STT Service not available (previous initialization failed).")
+
+            self._init_attempted = True
+            logger.info(
+                "Initializing STT Service (faster-whisper) with model='%s', language='%s'...",
+                self.model_name,
+                self.language,
+            )
+            if WhisperModel and BatchedInferencePipeline:
+                try:
+                    self._model = WhisperModel(self.model_name, device="cpu", compute_type="int8")
+                    self.batched_model = BatchedInferencePipeline(model=self._model)
+                    logger.info("STT Service initialized successfully with BatchedInferencePipeline.")
+                except Exception as e:
+                    logger.error(f"Failed to initialize STT Service: {e}")
+                    self.batched_model = None
+                    raise RuntimeError(f"STT initialization failed: {e}") from e
+            else:
+                raise RuntimeError("STT Service not available (faster-whisper not installed).")
 
     def transcribe(self, file_path: str) -> str:
         """
         Transcribe audio file to text using faster-whisper.
         Raises Exception if STT fails or not available.
         """
-        if not self.batched_model:
-            raise RuntimeError("STT Service not available (model not loaded).")
+        self._ensure_initialized()
 
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Audio file not found: {file_path}")

@@ -17,13 +17,17 @@ local.properties
 
 # Python / Server
 server/venv/
+server/.venv/
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
 env/
+.env.local
+.env.*.local
 pip-log.txt
 pip-delete-this-directory.txt
 .env
@@ -44,7 +48,11 @@ temp_aar/
 server/realtimesst.log
 server/STT样本-d472b87b-aa99-4edb-ae9d-32bb0c1e8c43_1769074773309.wav
 static/uploads/test_session_001_1769078221627.wav
+test_image.jpg
+test_input.jpg
 roboflow_cache/
 temp_mahjong_tiles/
+connection-config.json
+connection-config-qr.png
 update_icons.py
 ARMahjongAssistIcon2.png

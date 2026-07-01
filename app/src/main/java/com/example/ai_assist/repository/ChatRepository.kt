@@ -1,21 +1,33 @@
 package com.example.ai_assist.repository
 
 import com.example.ai_assist.model.AnalyzeResponse
+import com.example.ai_assist.model.ConnectionConfig
 import com.example.ai_assist.model.EndSessionRequest
 import com.example.ai_assist.model.StartSessionRequest
 import com.example.ai_assist.service.GameApiService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 
-class ChatRepository(private val apiService: GameApiService) {
+class ChatRepository(apiService: GameApiService) {
+    private var apiService: GameApiService = apiService
 
     private val _analyzeResult = MutableStateFlow<AnalyzeResponse?>(null)
     val analyzeResult: StateFlow<AnalyzeResponse?> = _analyzeResult
+
+    fun updateConnection(config: ConnectionConfig) {
+        apiService = Retrofit.Builder()
+            .baseUrl(config.serverUrl)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(GameApiService::class.java)
+    }
 
     suspend fun startSession(sessionId: String): Boolean {
         return try {

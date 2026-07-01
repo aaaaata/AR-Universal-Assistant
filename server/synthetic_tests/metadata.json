@@ -1,0 +1,143 @@
+{
+  "seed": 42,
+  "scenarios": [
+    {
+      "name": "scenario_01_balanced_wait",
+      "label": "均衡手牌",
+      "melded_tiles": [
+        "3m",
+        "4m",
+        "5m",
+        "7p",
+        "8p",
+        "9p"
+      ],
+      "user_hand": [
+        "2s",
+        "3s",
+        "4s",
+        "5s",
+        "6s",
+        "7s",
+        "8s",
+        "2m"
+      ]
+    },
+    {
+      "name": "scenario_02_after_draw",
+      "label": "摸牌后",
+      "melded_tiles": [
+        "3m",
+        "4m",
+        "5m",
+        "7p",
+        "8p",
+        "9p"
+      ],
+      "user_hand": [
+        "2s",
+        "3s",
+        "4s",
+        "5s",
+        "6s",
+        "7s",
+        "8s",
+        "2m",
+        "9s"
+      ]
+    },
+    {
+      "name": "scenario_03_pin_focus",
+      "label": "筒子偏重",
+      "melded_tiles": [
+        "2m",
+        "3m",
+        "4m",
+        "6s",
+        "7s",
+        "8s"
+      ],
+      "user_hand": [
+        "1p",
+        "2p",
+        "3p",
+        "4p",
+        "5p",
+        "6p",
+        "7p",
+        "9p"
+      ]
+    },
+    {
+      "name": "scenario_04_honor_mix",
+      "label": "字牌混合",
+      "melded_tiles": [
+        "1z",
+        "1z",
+        "1z",
+        "7z",
+        "7z",
+        "7z"
+      ],
+      "user_hand": [
+        "2m",
+        "3m",
+        "4m",
+        "5m",
+        "6m",
+        "6m",
+        "5z",
+        "5z"
+      ]
+    },
+    {
+      "name": "scenario_05_sou_flush",
+      "label": "索子清一色倾向",
+      "melded_tiles": [
+        "2s",
+        "3s",
+        "4s",
+        "6s",
+        "7s",
+        "8s"
+      ],
+      "user_hand": [
+        "1s",
+        "1s",
+        "4s",
+        "5s",
+        "5s",
+        "7s",
+        "8s",
+        "9s"
+      ]
+    },
+    {
+      "name": "scenario_06_pair_choice",
+      "label": "对子取舍",
+      "melded_tiles": [
+        "4p",
+        "5p",
+        "6p",
+        "2m",
+        "3m",
+        "4m"
+      ],
+      "user_hand": [
+        "1s",
+        "2s",
+        "3s",
+        "5s",
+        "6s",
+        "7s",
+        "9m",
+        "9m"
+      ]
+    }
+  ],
+  "capture_variants": [
+    "screen",
+    "perspective",
+    "glare"
+  ]
+}

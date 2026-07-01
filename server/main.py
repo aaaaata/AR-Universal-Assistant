@@ -1,13 +1,14 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from typing import List, Optional, Dict, Any
 from PIL import Image
 import uvicorn
 import shutil
 import os
 import datetime
+import socket
 import database
 import asyncio
 import logging
@@ -35,6 +36,19 @@ logger = logging.getLogger(__name__)
 # Global Session Trackers
 SESSION_TRACKERS: Dict[str, MahjongStateTracker] = {}
 EFFICIENCY_ENGINE = EfficiencyEngine()
+LATEST_ANALYZE_RESULTS: Dict[str, Dict[str, Any]] = {}
+UPLOAD_RETENTION_HOURS = int(os.getenv("UPLOAD_RETENTION_HOURS", "24"))
+UPLOAD_MAX_FILES = int(os.getenv("UPLOAD_MAX_FILES", "1500"))
+
+def get_best_lan_ip() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        sock.close()
 
 # Initialize Services
 # Note: Ensure OPENAI_API_KEY is set in environment or pass it here
@@ -136,6 +150,51 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/")
 async def read_root():
     return FileResponse(os.path.join(STATIC_DIR, "dashboard.html"))
+
+@app.get("/monitor")
+async def monitor_page():
+    return FileResponse(os.path.join(STATIC_DIR, "dashboard.html"))
+
+@app.get("/mock/qr", response_class=HTMLResponse)
+async def mock_qr_page():
+    return FileResponse(os.path.join(STATIC_DIR, "mock_qr.html"))
+
+@app.get("/api/mock/connection-config")
+async def mock_connection_config(
+    request: Request,
+    fps: int = 1,
+    label: str = "本地模拟服务",
+    host: Optional[str] = None,
+):
+    resolved_host = host or os.getenv("MOCK_PUBLIC_HOST") or get_best_lan_ip()
+
+    safe_fps = max(1, min(fps, 5))
+    return {
+        "version": 1,
+        "serverUrl": f"http://{resolved_host}:8000/",
+        "streamUrl": f"ws://{resolved_host}:8000/ws/mock-suggestions/default",
+        "fps": safe_fps,
+        "label": label,
+    }
+
+@app.websocket("/ws/mock-suggestions/{session_id}")
+async def mock_suggestions_ws(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    try:
+        while True:
+            latest = LATEST_ANALYZE_RESULTS.get(session_id) or LATEST_ANALYZE_RESULTS.get("default")
+            if latest is None:
+                latest = {
+                    "session_id": session_id,
+                    "status": "waiting",
+                    "suggested_play": "等待新一帧分析结果",
+                    "user_hand": [],
+                    "melded_tiles": [],
+                }
+            await websocket.send_json(latest)
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        logger.info(f"Mock suggestion websocket disconnected: {session_id}")
 
 @app.post("/api/start-session")
 async def start_session(request: StartSessionRequest):
@@ -330,6 +389,20 @@ async def analyze_hand(
         steps=steps_log,
         response=response_data.dict()
     )
+
+    latest_payload = {
+        "session_id": session_id,
+        "status": "ready",
+        "suggested_play": suggested_play,
+        "user_hand": user_hand,
+        "melded_tiles": melded_tiles,
+        "annotated_image_path": annotated_path,
+        "action_detected": action_detected,
+        "warning": warning_msg,
+        "is_stable": warning_msg is None,
+    }
+    LATEST_ANALYZE_RESULTS[session_id] = latest_payload
+    LATEST_ANALYZE_RESULTS["default"] = latest_payload
     
     logger.info(f"Processed successfully. Response sent.")
     return response_data
@@ -504,9 +577,74 @@ async def monitor_inactive_sessions():
             logger.error(f"Monitor Error: {e}")
             await asyncio.sleep(60) # Wait before retrying
 
+def cleanup_upload_dir(max_age_hours: int = UPLOAD_RETENTION_HOURS, max_files: int = UPLOAD_MAX_FILES):
+    now = datetime.datetime.now().timestamp()
+    max_age_seconds = max_age_hours * 3600
+    kept_entries = []
+    removed_count = 0
+    removed_bytes = 0
+
+    try:
+        with os.scandir(UPLOAD_DIR) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                try:
+                    stat = entry.stat()
+                except FileNotFoundError:
+                    continue
+
+                age_seconds = now - stat.st_mtime
+                if age_seconds > max_age_seconds:
+                    try:
+                        os.remove(entry.path)
+                        removed_count += 1
+                        removed_bytes += stat.st_size
+                    except FileNotFoundError:
+                        pass
+                    continue
+
+                kept_entries.append((entry.path, stat.st_mtime, stat.st_size))
+
+        if len(kept_entries) > max_files:
+            kept_entries.sort(key=lambda item: item[1], reverse=True)
+            for path, _, size in kept_entries[max_files:]:
+                try:
+                    os.remove(path)
+                    removed_count += 1
+                    removed_bytes += size
+                except FileNotFoundError:
+                    pass
+
+        return removed_count, removed_bytes
+    except Exception as e:
+        logger.error(f"Upload cleanup error: {e}")
+        return 0, 0
+
+async def monitor_upload_cleanup():
+    logger.info(
+        "Starting upload cleanup monitor with retention=%sh max_files=%s",
+        UPLOAD_RETENTION_HOURS,
+        UPLOAD_MAX_FILES,
+    )
+    while True:
+        try:
+            await asyncio.sleep(600)
+            removed_count, removed_bytes = cleanup_upload_dir()
+            if removed_count > 0:
+                logger.info(
+                    "Upload cleanup removed %s files (%.2f MB)",
+                    removed_count,
+                    removed_bytes / (1024 * 1024),
+                )
+        except Exception as e:
+            logger.error(f"Upload cleanup monitor error: {e}")
+            await asyncio.sleep(600)
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(monitor_inactive_sessions())
+    asyncio.create_task(monitor_upload_cleanup())
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

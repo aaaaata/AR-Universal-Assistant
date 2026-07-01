@@ -5,50 +5,46 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
 import android.graphics.Matrix
-import android.graphics.Rect
 import android.graphics.SurfaceTexture
-import android.graphics.YuvImage
 import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
-import android.util.Size
-import java.util.Collections
-import kotlin.math.abs
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
-import android.media.Image
 import android.media.ImageReader
 import android.net.Uri
+import android.content.Intent
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
 import android.text.Spannable
 import android.text.SpannableString
-import android.text.style.AbsoluteSizeSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.TypefaceSpan
 import android.util.Log
 import android.util.Range
+import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
-import android.widget.Toast
+import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import com.example.ai_assist.databinding.ActivityMainBinding
+import com.example.ai_assist.model.ConnectionConfig
 import com.example.ai_assist.repository.ChatRepository
 import com.example.ai_assist.service.GameApiService
 import com.example.ai_assist.service.RayNeoDeviceManager
+import com.example.ai_assist.storage.ConnectionConfigStore
+import com.example.ai_assist.utils.RayNeoAudioRecorder
 import com.example.ai_assist.viewmodel.ChatViewModel
 import com.example.ai_assist.viewmodel.ChatViewModelFactory
-import com.example.ai_assist.utils.RayNeoAudioRecorder
 import com.ffalcon.mercury.android.sdk.touch.TempleAction
 import com.ffalcon.mercury.android.sdk.ui.activity.BaseMirrorActivity
 import kotlinx.coroutines.Dispatchers
@@ -56,24 +52,31 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.nio.ByteBuffer
-import java.text.SimpleDateFormat
+import java.util.Collections
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
+    private enum class UiMode { CONFIG, STREAMING }
+
     private lateinit var viewModel: ChatViewModel
     private lateinit var cameraExecutor: ExecutorService
+    private lateinit var configStore: ConnectionConfigStore
 
-    // Camera2 variables
     private val surfaceList = mutableListOf<Surface>()
     private var cameraDevice: CameraDevice? = null
     private lateinit var cameraManager: CameraManager
@@ -84,14 +87,20 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private var cameraJob: Job? = null
     private var previewSize: Size? = null
     private var currentPhotoFile: File? = null
-    
-    // Audio Recorder
+    private var captureLoopJob: Job? = null
+    private val uploadInFlight = AtomicBoolean(false)
+    private var pendingAutoUpload = false
+    private var hasStartedCamera = false
+
     private var audioRecorder: RayNeoAudioRecorder? = null
     private var isRecordingAudio = false
-
-    // Game State Management
-    enum class GameState { IDLE, GAMING, CAMERA_PREVIEW, PHOTO_REVIEW }
-    private var currentState = GameState.IDLE
+    private var currentMode = UiMode.CONFIG
+    private var activeConfig: ConnectionConfig? = null
+    private val streamClient = OkHttpClient()
+    private var suggestionSocket: WebSocket? = null
+    private var configFocusIndex = 0
+    private var isPrimaryConnected = false
+    private var isSuggestionStreamConnected = false
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -101,12 +110,32 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             }
         }
 
+    private val scanLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val contents = result.data?.getStringExtra(QrScanActivity.EXTRA_QR_CONTENT)
+            if (contents.isNullOrBlank()) {
+                showCustomToast("未识别到二维码")
+                return@registerForActivityResult
+            }
+
+            val parsed = configStore.parse(contents)
+            if (parsed == null) {
+                showCustomToast("二维码配置格式无效")
+                return@registerForActivityResult
+            }
+
+            configStore.save(parsed)
+            showCustomToast("配置已保存")
+            applyConnectionConfig(parsed, startStreaming = true)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // BaseMirrorActivity handles setContentView
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        configStore = ConnectionConfigStore(this)
         cameraExecutor = Executors.newSingleThreadExecutor()
-        
+
         backHandlerThread = HandlerThread("background")
         backHandlerThread.start()
         backHandler = Handler(backHandlerThread.looper)
@@ -115,29 +144,540 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         setupUI()
         observeViewModel()
         checkPermissions()
-        
-        // Initial State
-        updateGameState(GameState.IDLE)
+
+        val savedConfig = configStore.load()
+        if (savedConfig == null) {
+            showConfigMode()
+        } else {
+            applyConnectionConfig(savedConfig, startStreaming = true)
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        if (currentState == GameState.CAMERA_PREVIEW) {
-            startCamera()
+        if (currentMode == UiMode.STREAMING && !hasStartedCamera) {
+            startStreamingUi()
         }
     }
 
     override fun onPause() {
+        stopCaptureLoop()
+        disconnectSuggestionStream()
+        stopAudioRecording(silent = true)
         closeCamera()
         super.onPause()
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        stopCaptureLoop()
+        disconnectSuggestionStream()
         closeCamera()
-        audioRecorder?.stop()
+        stopAudioRecording(silent = true)
         cameraExecutor.shutdown()
         backHandlerThread.quitSafely()
+        streamClient.dispatcher.executorService.shutdown()
+        streamClient.connectionPool.evictAll()
+        super.onDestroy()
+    }
+
+    private fun setupDependencies() {
+        val retrofit = Retrofit.Builder()
+            .baseUrl(AppConfig.SERVER_BASE_URL)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+
+        val apiService = retrofit.create(GameApiService::class.java)
+        val repository = ChatRepository(apiService)
+        val deviceManager = RayNeoDeviceManager(this)
+        val factory = ChatViewModelFactory(repository, deviceManager)
+        viewModel = ViewModelProvider(this, factory)[ChatViewModel::class.java]
+
+        audioRecorder = RayNeoAudioRecorder(this) { file ->
+            viewModel.uploadAudio(file)
+        }
+    }
+
+    private fun setupUI() {
+        mBindingPair.updateView {
+            tvStatus.text = "未配置连接"
+            tvStatus.setTextColor(getColor(R.color.neon_green))
+            tvContentHand.text = ""
+            tvContentSuggested.text = ""
+            tvContentWaiting.text = ""
+
+            btnScrollUp.setOnClickListener {
+                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
+                svContentWaiting.smoothScrollBy(0, -scrollAmount)
+            }
+            btnScrollDown.setOnClickListener {
+                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
+                svContentWaiting.smoothScrollBy(0, scrollAmount)
+            }
+
+            tvConnectionStatus.setOnClickListener { toggleConfigMode() }
+            btnScanConfig.setOnClickListener {
+                configFocusIndex = 0
+                updateConfigFocusUi()
+                launchQrScanner()
+            }
+            btnUseSavedConfig.setOnClickListener {
+                configFocusIndex = 1
+                updateConfigFocusUi()
+                configStore.load()?.let {
+                    applyConnectionConfig(it, startStreaming = true)
+                } ?: showCustomToast("暂无已保存配置")
+            }
+            btnClearConfig.setOnClickListener {
+                configFocusIndex = 2
+                updateConfigFocusUi()
+                configStore.clear()
+                activeConfig = null
+                stopStreaming()
+                showConfigMode()
+            }
+        }
+    }
+
+    private fun observeViewModel() {
+        lifecycleScope.launch {
+            viewModel.mappedResult.collect { result ->
+                result?.let {
+                    mBindingPair.updateView {
+                        tvContentHand.text = formatMahjongText(it.userHand.joinToString(" "))
+                        tvContentSuggested.text = formatMahjongText(it.meldedTiles.joinToString(" "))
+                        tvContentWaiting.text = formatMahjongText(it.suggestedPlay)
+                    }
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            templeActionViewModel.state.collect { action ->
+                when (action) {
+                    is TempleAction.Click -> handleTempleClick()
+                    is TempleAction.DoubleClick -> handleDoubleClickBack()
+                    is TempleAction.SlideForward -> toggleAudioRecording()
+                    is TempleAction.SlideBackward -> handleSlideBackward()
+                    is TempleAction.SlideUpwards -> {
+                        if (currentMode == UiMode.CONFIG) {
+                            moveConfigFocus(-1)
+                        } else {
+                            mBindingPair.updateView {
+                                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
+                                svContentWaiting.smoothScrollBy(0, scrollAmount)
+                            }
+                        }
+                    }
+                    is TempleAction.SlideDownwards -> {
+                        if (currentMode == UiMode.CONFIG) {
+                            moveConfigFocus(1)
+                        } else {
+                            mBindingPair.updateView {
+                                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
+                                svContentWaiting.smoothScrollBy(0, -scrollAmount)
+                            }
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    private fun handleDoubleClickBack() {
+        var isPhotoReviewVisible = false
+        mBindingPair.updateView {
+            isPhotoReviewVisible = layoutPhotoReviewContainer.visibility == View.VISIBLE
+        }
+        if (isPhotoReviewVisible) {
+            mBindingPair.updateView {
+                layoutPhotoReviewContainer.visibility = View.GONE
+                imagePhotoReview.setImageDrawable(null)
+            }
+            return
+        }
+        if (currentMode == UiMode.CONFIG) {
+            continueWithSavedOrActiveConfig()?.let {
+                return
+            }
+        }
+        stopStreaming()
+        finish()
+    }
+
+    private fun handleTempleClick() {
+        if (currentMode == UiMode.CONFIG) {
+            activateFocusedConfigAction()
+            return
+        }
+    }
+
+    private fun moveConfigFocus(direction: Int) {
+        val optionCount = 3
+        configFocusIndex = (configFocusIndex + direction + optionCount) % optionCount
+        updateConfigFocusUi()
+    }
+
+    private fun handleSlideBackward() {
+        if (currentMode == UiMode.CONFIG) {
+            continueWithSavedOrActiveConfig() ?: showCustomToast("暂无已保存配置")
+        } else {
+            showConfigMode()
+        }
+    }
+
+    private fun activateFocusedConfigAction() {
+        when (configFocusIndex) {
+            0 -> launchQrScanner()
+            1 -> {
+                continueWithSavedOrActiveConfig() ?: showCustomToast("暂无已保存配置")
+            }
+            2 -> {
+                configStore.clear()
+                activeConfig = null
+                stopStreaming()
+                showConfigMode()
+                showCustomToast("已清除配置")
+            }
+        }
+    }
+
+    private fun updateConfigFocusUi() {
+        mBindingPair.updateView {
+            val focusedBackground = R.drawable.bg_config_option_focused
+            val idleBackground = R.drawable.bg_config_option_idle
+
+            btnScanConfig.setBackgroundResource(if (configFocusIndex == 0) focusedBackground else idleBackground)
+            btnUseSavedConfig.setBackgroundResource(if (configFocusIndex == 1) focusedBackground else idleBackground)
+            btnClearConfig.setBackgroundResource(if (configFocusIndex == 2) focusedBackground else idleBackground)
+
+            btnScanConfig.alpha = if (configFocusIndex == 0) 1f else 0.72f
+            btnUseSavedConfig.alpha = if (configFocusIndex == 1) 1f else 0.72f
+            btnClearConfig.alpha = if (configFocusIndex == 2) 1f else 0.72f
+
+            btnScanConfig.text = if (configFocusIndex == 0) "▶ 1. 扫码连接" else "1. 扫码连接"
+            btnUseSavedConfig.text = if (configFocusIndex == 1) "▶ 2. 继续当前配置" else "2. 继续当前配置"
+            btnClearConfig.text = if (configFocusIndex == 2) "▶ 3. 清除配置" else "3. 清除配置"
+
+            tvConfigGestureHint.text = when (configFocusIndex) {
+                0 -> "当前焦点：扫码连接。上滑下滑切换，单击确认。"
+                1 -> "当前焦点：继续当前配置。上滑下滑切换，单击确认。"
+                else -> "当前焦点：清除配置。上滑下滑切换，单击确认。"
+            }
+        }
+    }
+
+    private fun applyConnectionConfig(config: ConnectionConfig, startStreaming: Boolean) {
+        val hasConfigChanged = activeConfig != null && activeConfig != config
+        if (hasConfigChanged) {
+            viewModel.endCurrentSession()
+        }
+        activeConfig = config
+        viewModel.updateConnection(config)
+        updateConnectionSummary(config)
+        if (startStreaming) {
+            startStreaming()
+        }
+    }
+
+    private fun continueWithSavedOrActiveConfig(): ConnectionConfig? {
+        val targetConfig = activeConfig ?: configStore.load() ?: return null
+        if (activeConfig == targetConfig) {
+            updateConnectionSummary(targetConfig)
+            startStreaming()
+            return targetConfig
+        }
+        applyConnectionConfig(targetConfig, startStreaming = true)
+        return targetConfig
+    }
+
+    private fun updateConnectionSummary(config: ConnectionConfig?) {
+        mBindingPair.updateView {
+            val summary = buildConfigSummary(config)
+            tvConfigSummary.text = summary
+            tvConnectionSummary.text = summary
+            tvConfigDetails.text = buildConfigDetails(config)
+            tvConnectionStatus.text = if (config == null) "连接配置" else "已连接"
+        }
+    }
+
+    private fun showConfigMode() {
+        currentMode = UiMode.CONFIG
+        stopCaptureLoop()
+        closeCamera()
+        mBindingPair.updateView {
+            layoutConfigContainer.visibility = View.VISIBLE
+            cardCameraPreview.visibility = View.GONE
+            tvInstructionCameraPreview.visibility = View.GONE
+            tvStreamGestureHint.visibility = View.GONE
+            viewConnectionIndicator.visibility = View.GONE
+            tvStatus.visibility = View.VISIBLE
+            tvConnectionSummary.visibility = View.VISIBLE
+            layoutPhotoReviewContainer.visibility = View.GONE
+            layoutInstructionGaming.visibility = View.GONE
+            tvInstructionIdle.visibility = View.VISIBLE
+            tvInstructionIdle.text = "上下选择 / 单击确认"
+            tvStatus.text = "设置"
+            tvConnectionSummary.text = buildConfigSummary(activeConfig)
+            tvConfigDetails.text = buildConfigDetails(activeConfig)
+        }
+        updateConnectionSummary(activeConfig)
+        updateConfigFocusUi()
+    }
+
+    private fun startStreaming() {
+        currentMode = UiMode.STREAMING
+        isPrimaryConnected = false
+        isSuggestionStreamConnected = false
+        startStreamingUi()
+        connectSuggestionStream()
+        lifecycleScope.launch {
+            val started = viewModel.ensureSessionStarted()
+            if (!started) {
+                showCustomToast("无法建立会话")
+                showConfigMode()
+                return@launch
+            }
+            isPrimaryConnected = true
+            refreshConnectionStatus()
+            startCaptureLoop(activeConfig?.fps ?: AppConfig.DEFAULT_CAPTURE_FPS)
+        }
+    }
+
+    private fun startStreamingUi() {
+        hasStartedCamera = true
+        mBindingPair.updateView {
+            layoutConfigContainer.visibility = View.GONE
+            layoutInstructionGaming.visibility = View.GONE
+            tvStreamGestureHint.visibility = View.GONE
+            tvInstructionIdle.visibility = View.GONE
+            tvStatus.visibility = View.GONE
+            tvConnectionSummary.visibility = View.GONE
+            viewConnectionIndicator.visibility = View.VISIBLE
+            cardCameraPreview.visibility = View.VISIBLE
+            tvInstructionCameraPreview.visibility = View.GONE
+            layoutPhotoReviewContainer.visibility = View.GONE
+            tvStatus.text = activeConfig?.label ?: "运行中"
+            tvConnectionSummary.text = activeConfig?.let {
+                "${it.label ?: "已连"}  ${it.fps} fps"
+            } ?: "未配置连接"
+            tvConnectionStatus.text = "已连接"
+            tvStreamGestureHint.text = "录 | 设 | 退"
+        }
+        startCamera()
+    }
+
+    private fun stopStreaming() {
+        currentMode = UiMode.CONFIG
+        stopCaptureLoop()
+        disconnectSuggestionStream()
+        stopAudioRecording(silent = true)
+        closeCamera()
+        viewModel.endCurrentSession()
+    }
+
+    private fun connectSuggestionStream() {
+        disconnectSuggestionStream()
+        val streamUrl = activeConfig?.streamUrl ?: return
+        val request = Request.Builder().url(streamUrl).build()
+        suggestionSocket = streamClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                isSuggestionStreamConnected = true
+                runOnUiThread {
+                    refreshConnectionStatus()
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                applySuggestionPayload(text)
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e("SuggestionStream", "WebSocket failed", t)
+                isSuggestionStreamConnected = false
+                runOnUiThread {
+                    refreshConnectionStatus()
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                isSuggestionStreamConnected = false
+                runOnUiThread {
+                    if (currentMode == UiMode.STREAMING) {
+                        refreshConnectionStatus()
+                    }
+                }
+            }
+        })
+    }
+
+    private fun disconnectSuggestionStream() {
+        suggestionSocket?.close(1000, "client closing")
+        suggestionSocket = null
+        isSuggestionStreamConnected = false
+    }
+
+    private fun applySuggestionPayload(raw: String) {
+        runOnUiThread {
+            runCatching {
+                val json = JSONObject(raw)
+                val hand = json.optJSONArray("user_hand")
+                val melded = json.optJSONArray("melded_tiles")
+                val suggestion = json.optString("suggested_play", "")
+                val status = json.optString("status", "ready")
+
+                val handText = buildJsonArrayText(hand)
+                val meldedText = buildJsonArrayText(melded)
+
+                mBindingPair.updateView {
+                    if (handText.isNotBlank()) {
+                        tvContentHand.text = formatMahjongText(handText)
+                    }
+                    if (meldedText.isNotBlank()) {
+                        tvContentSuggested.text = formatMahjongText(meldedText)
+                    }
+                    if (suggestion.isNotBlank()) {
+                        tvContentWaiting.text = formatMahjongText(suggestion)
+                    }
+                    tvConnectionSummary.text = buildString {
+                        append(activeConfig?.label ?: "已连")
+                        append("  ")
+                        append(activeConfig?.fps ?: AppConfig.DEFAULT_CAPTURE_FPS)
+                        append(" fps")
+                    }
+                }
+                if (status == "ready") {
+                    isSuggestionStreamConnected = true
+                }
+                refreshConnectionStatus(status)
+            }.onFailure {
+                Log.e("SuggestionStream", "Failed to parse payload: $raw", it)
+            }
+        }
+    }
+
+    private fun refreshConnectionStatus(streamStatus: String? = null) {
+        if (currentMode != UiMode.STREAMING) return
+        val text = when {
+            isSuggestionStreamConnected && streamStatus == "processing" -> "等待建议"
+            isSuggestionStreamConnected -> "流已连接"
+            isPrimaryConnected -> "已连接"
+            else -> "连接中"
+        }
+        val indicatorColor = when {
+            isSuggestionStreamConnected -> R.color.neon_green
+            isPrimaryConnected -> R.color.bright_blue
+            else -> R.color.red
+        }
+        mBindingPair.updateView {
+            tvConnectionStatus.text = text
+            viewConnectionIndicator.backgroundTintList =
+                ContextCompat.getColorStateList(this@MainActivity, indicatorColor)
+        }
+    }
+
+    private fun buildConfigSummary(config: ConnectionConfig?): String {
+        return if (config == null) {
+            "未配置连接"
+        } else {
+            buildString {
+                append(config.label ?: "当前环境")
+                append("  ")
+                append("${config.fps} fps")
+            }
+        }
+    }
+
+    private fun buildConfigDetails(config: ConnectionConfig?): String {
+        if (config == null) {
+            return "环境: 未配置 | 主地址: 请先扫码连接 | 流式: 未配置 | 会话Key: 无 | 操作: 内滑录音 | 外滑设置 | 双击返回"
+        }
+
+        val streamState = when {
+            config.streamUrl.isNullOrBlank() -> "未配置"
+            isSuggestionStreamConnected -> "已连接"
+            currentMode == UiMode.STREAMING -> "已配置"
+            else -> "已配置"
+        }
+        val sessionState = if (config.sessionKey.isNullOrBlank()) "无" else "已配置"
+
+        return buildString {
+            append("环境: ${config.label ?: "当前环境"}")
+            append(" | 主地址: ${config.serverUrl}")
+            append(" | 流式: $streamState")
+            append(" | 会话Key: $sessionState")
+            append(" | 操作: 内滑录音 | 外滑设置 | 双击返回")
+        }
+    }
+
+    private fun buildJsonArrayText(array: org.json.JSONArray?): String {
+        if (array == null) return ""
+        val items = mutableListOf<String>()
+        for (index in 0 until array.length()) {
+            items.add(array.optString(index))
+        }
+        return items.joinToString(" ")
+    }
+
+    private fun toggleConfigMode() {
+        if (currentMode == UiMode.CONFIG) {
+            configStore.load()?.let {
+                applyConnectionConfig(it, startStreaming = true)
+            } ?: showCustomToast("请先扫码配置")
+        } else {
+            showConfigMode()
+        }
+    }
+
+    private fun toggleAudioRecording() {
+        if (currentMode != UiMode.STREAMING) {
+            return
+        }
+
+        if (isRecordingAudio) {
+            stopAudioRecording()
+        } else {
+            audioRecorder?.start()
+            isRecordingAudio = true
+            showCustomToast("录音开始")
+        }
+    }
+
+    private fun stopAudioRecording(silent: Boolean = false) {
+        if (!isRecordingAudio) return
+        audioRecorder?.stop()
+        isRecordingAudio = false
+        if (!silent) {
+            showCustomToast("录音停止")
+        }
+    }
+
+    private fun startCaptureLoop(fps: Int) {
+        stopCaptureLoop()
+        val safeFps = fps.coerceIn(1, AppConfig.MAX_CAPTURE_FPS)
+        val intervalMs = 1000L / safeFps
+        captureLoopJob = lifecycleScope.launch {
+            while (currentMode == UiMode.STREAMING) {
+                if (!uploadInFlight.get() && cameraCaptureSession != null) {
+                    pendingAutoUpload = true
+                    uploadInFlight.set(true)
+                    takePhoto()
+                }
+                delay(intervalMs)
+            }
+        }
+    }
+
+    private fun stopCaptureLoop() {
+        captureLoopJob?.cancel()
+        captureLoopJob = null
+        uploadInFlight.set(false)
+        pendingAutoUpload = false
+        hasStartedCamera = false
+    }
+
+    private fun launchQrScanner() {
+        scanLauncher.launch(Intent(this, QrScanActivity::class.java))
     }
 
     private fun checkPermissions() {
@@ -157,147 +697,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         }
     }
 
-    private fun setupDependencies() {
-        // Network
-        // Configured for local real device debugging
-        val retrofit = Retrofit.Builder()
-            .baseUrl(AppConfig.SERVER_BASE_URL)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-        
-        val apiService = retrofit.create(GameApiService::class.java)
-        
-        // Data & Device
-        val repository = ChatRepository(apiService)
-        val deviceManager = RayNeoDeviceManager(this)
-        
-        val factory = ChatViewModelFactory(repository, deviceManager)
-        viewModel = ViewModelProvider(this, factory)[ChatViewModel::class.java]
-
-        // Initialize Audio Recorder
-        audioRecorder = RayNeoAudioRecorder(this) { file ->
-            viewModel.uploadAudio(file)
-        }
-    }
-
-    private fun setupUI() {
-        mBindingPair.updateView { 
-            tvStatus.text = "已连接"
-            tvStatus.setTextColor(getColor(R.color.neon_green))
-            // Clear test data
-            tvContentHand.text = ""
-            tvContentSuggested.text = ""
-            tvContentWaiting.text = ""
-
-            // Setup scroll buttons
-            btnScrollUp.setOnClickListener {
-                // Scroll approximately one line (considering 2.5x tile size + spacing)
-                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
-                svContentWaiting.smoothScrollBy(0, -scrollAmount)
-            }
-            btnScrollDown.setOnClickListener {
-                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
-                svContentWaiting.smoothScrollBy(0, scrollAmount)
-            }
-        }
-    }
-
-    private fun updateGameState(newState: GameState) {
-        // 如果从相机预览模式退出到其他模式（不包括照片预览），需要关闭相机
-        if (currentState == GameState.CAMERA_PREVIEW && newState != GameState.CAMERA_PREVIEW && newState != GameState.PHOTO_REVIEW) {
-            closeCamera()
-        }
-        // 如果从照片预览模式退出到其他模式，也确保关闭相机
-        if (currentState == GameState.PHOTO_REVIEW && newState != GameState.PHOTO_REVIEW) {
-            closeCamera()
-        }
-
-        currentState = newState
-        mBindingPair.updateView {
-            // Reset Visibilities
-            tvInstructionIdle.visibility = View.GONE
-            layoutInstructionGaming.visibility = View.GONE
-            cardCameraPreview.visibility = View.GONE
-            tvInstructionCameraPreview.visibility = View.GONE
-            layoutPhotoReviewContainer.visibility = View.GONE
-
-            when (newState) {
-                GameState.IDLE -> {
-                    tvInstructionIdle.visibility = View.VISIBLE
-                    tvStatus.text = "已连接 - 等待开始"
-                    // Clear tiles logic if needed
-                }
-                GameState.GAMING -> {
-                    layoutInstructionGaming.visibility = View.VISIBLE
-                    tvStatus.text = "对局中"
-                }
-                GameState.CAMERA_PREVIEW -> {
-                    cardCameraPreview.visibility = View.VISIBLE
-                    tvInstructionCameraPreview.visibility = View.VISIBLE
-                    tvStatus.text = "拍照模式"
-                    startCamera()
-                }
-                GameState.PHOTO_REVIEW -> {
-                    layoutPhotoReviewContainer.visibility = View.VISIBLE
-                    tvStatus.text = "确认照片"
-                }
-            }
-        }
-    }
-
-    private fun observeViewModel() {
-        lifecycleScope.launch {
-            viewModel.mappedResult.collect { result ->
-                result?.let {
-                    mBindingPair.updateView {
-                        tvContentHand.text = formatMahjongText(it.userHand.joinToString(" "))
-                        tvContentSuggested.text = formatMahjongText(it.meldedTiles.joinToString(" "))
-                        
-                        // Process suggested play text to resize unicode characters
-                        tvContentWaiting.text = formatMahjongText(it.suggestedPlay)
-                    }
-                }
-            }
-        }
-
-        lifecycleScope.launch {
-            templeActionViewModel.state.collect { action ->
-                when (action) {
-                    is TempleAction.Click -> {
-                        if (currentState == GameState.CAMERA_PREVIEW) {
-                            takePhoto()
-                        } else if (currentState == GameState.GAMING) {
-                            updateGameState(GameState.CAMERA_PREVIEW)
-                        }
-                    }
-                    is TempleAction.DoubleClick -> handleDoubleClick()
-                    is TempleAction.TripleClick -> handleTripleClick()
-                    is TempleAction.SlideForward -> handleSwipeForward()
-                    is TempleAction.SlideBackward -> handleSwipeBackward()
-                    is TempleAction.SlideUpwards -> {
-                        mBindingPair.updateView {
-                            val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
-                            svContentWaiting.smoothScrollBy(0, scrollAmount)
-                        }
-                    }
-                    is TempleAction.SlideDownwards -> {
-                        mBindingPair.updateView {
-                            val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
-                            svContentWaiting.smoothScrollBy(0, -scrollAmount)
-                        }
-                    }
-                    else -> {
-                        Log.d("TempleAction", "Received: $action")
-                    }
-                }
-            }
-        }
-    }
-
     private fun formatMahjongText(originalText: String): SpannableString {
         val spannable = SpannableString(originalText)
-
-        // Load custom font if enabled
         val mahjongTypeface = if (AppConfig.USE_COLOR_FONT) {
             try {
                 resources.getFont(R.font.mahjong_color)
@@ -309,16 +710,16 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             null
         }
 
-        // Reduce scale factor since the bitmap font is quite large
-        val scaleFactor = if (AppConfig.USE_COLOR_FONT) AppConfig.FONT_SCALE_COLOR else AppConfig.FONT_SCALE_DEFAULT
+        val scaleFactor = if (AppConfig.USE_COLOR_FONT) {
+            AppConfig.FONT_SCALE_COLOR
+        } else {
+            AppConfig.FONT_SCALE_DEFAULT
+        }
 
-        // Find all mahjong unicode characters (range U+1F000 to U+1F02B)
         var index = 0
         while (index < originalText.length) {
             val codePoint = originalText.codePointAt(index)
             val charCount = Character.charCount(codePoint)
-
-            // Check if it's a Mahjong tile character (U+1F000 - U+1F02B)
             if (codePoint in 0x1F000..0x1F02B) {
                 spannable.setSpan(
                     RelativeSizeSpan(scaleFactor),
@@ -327,7 +728,6 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                     Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
                 )
 
-                // Apply custom font if available
                 if (mahjongTypeface != null) {
                     spannable.setSpan(
                         TypefaceSpan(mahjongTypeface),
@@ -342,84 +742,20 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         return spannable
     }
 
-    private fun handleDoubleClick() {
-        onBackPressedDispatcher.onBackPressed()
-    }
-
-    private fun handleTripleClick() {
-        when (currentState) {
-            GameState.IDLE -> {
-                // Start New Session
-                lifecycleScope.launch {
-                    viewModel.startNewSession()
-                    clearGameData() // Clear data when starting a new game
-                    updateGameState(GameState.GAMING)
-                }
-            }
-            GameState.GAMING -> {
-                // End Session
-                viewModel.endCurrentSession()
-                updateGameState(GameState.IDLE)
-                clearGameData() // Clear data when ending a game
-            }
-            else -> {}
-        }
-    }
-
-    private fun handleSwipeForward() {
-        if (currentState == GameState.GAMING) {
-            if (isRecordingAudio) {
-                audioRecorder?.stop()
-                isRecordingAudio = false
-                showCustomToast("录音停止")
-            } else {
-                audioRecorder?.start()
-                isRecordingAudio = true
-                showCustomToast("录音开始")
-            }
-        } else if (currentState == GameState.PHOTO_REVIEW) {
-            // Cancel Photo
-            showCustomToast("取消拍照")
-            updateGameState(GameState.GAMING)
-        } else if (currentState == GameState.CAMERA_PREVIEW) {
-            // Cancel Camera Preview
-            updateGameState(GameState.GAMING)
-        }
-    }
-
-    private fun handleSwipeBackward() {
-        if (currentState == GameState.PHOTO_REVIEW) {
-            // Send Photo
-            currentPhotoFile?.let { file ->
-                showCustomToast("正在分析手牌...")
-                viewModel.uploadPhoto(file)
-            }
-            updateGameState(GameState.GAMING)
-        }
-    }
-
-    private fun clearGameData() {
-        mBindingPair.updateView {
-            tvContentHand.text = ""
-            tvContentSuggested.text = ""
-            tvContentWaiting.text = ""
-        }
-    }
-
-    // Camera2 Implementation
     private fun startCamera() {
+        if (surfaceList.isNotEmpty()) {
+            return
+        }
+
         surfaceList.clear()
         mBindingPair.updateView {
-            // 定义处理逻辑，避免重复代码
             fun onSurfaceReady(surface: SurfaceTexture, width: Int, height: Int) {
                 configureTransform(width, height)
-                val s = Surface(surface)
-                // 避免重复添加同一个 Surface
-                if (!surfaceList.contains(s)) {
-                    surfaceList.add(s)
+                val previewSurface = Surface(surface)
+                if (!surfaceList.contains(previewSurface)) {
+                    surfaceList.add(previewSurface)
                 }
-                
-                // 当左右眼两个 Surface 都准备好时启动相机
+
                 if (surfaceList.size == 2) {
                     lifecycleScope.launch {
                         delay(100L)
@@ -436,14 +772,13 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
                     configureTransform(width, height)
                 }
+
                 override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
             }
 
-            // [修复关键点]：如果 TextureView 已经可用（如从后台恢复时），
-            // setSurfaceTextureListener 不会触发回调，必须手动检查并处理。
             if (viewCameraPreview.isAvailable) {
-                viewCameraPreview.surfaceTexture?.let { 
+                viewCameraPreview.surfaceTexture?.let {
                     onSurfaceReady(it, viewCameraPreview.width, viewCameraPreview.height)
                 }
             }
@@ -454,33 +789,13 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         mBindingPair.updateView {
             val textureView = viewCameraPreview
             val matrix = Matrix()
-            
-            // Use dynamically selected preview size or fallback to 900x1200 (3:4)
             val pWidth = previewSize?.width?.toFloat() ?: 900f
             val pHeight = previewSize?.height?.toFloat() ?: 1200f
-            
             val centerX = viewWidth / 2f
             val centerY = viewHeight / 2f
-            
-            // Calculate scaling to FIT HEIGHT while maintaining aspect ratio
-            // The texture is initially stretched to fit viewWidth x viewHeight
-            // We want to un-stretch it and make it fill height
-            
             val videoAspect = pWidth / pHeight
-            val viewAspect = viewWidth.toFloat() / viewHeight
-            
-            // Target dimensions to fit height:
-            // height = viewHeight
-            // width = viewHeight * videoAspect
-            
-            // Calculate scale factors relative to the current stretched view
-            // scaleY = targetHeight / viewHeight = 1.0f
-            // scaleX = targetWidth / viewWidth = (viewHeight * videoAspect) / viewWidth
-            
             val scaleX = (viewHeight * videoAspect) / viewWidth
-            val scaleY = 1f
-            
-            matrix.setScale(scaleX, scaleY, centerX, centerY)
+            matrix.setScale(scaleX, 1f, centerX, centerY)
             textureView.setTransform(matrix)
         }
     }
@@ -488,27 +803,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private fun setupCamera2() {
         cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try {
-            val cameraId = cameraManager.cameraIdList.first() // Usually back camera
-            
-            // Calculate optimal preview size
+            val cameraId = cameraManager.cameraIdList.first()
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            
-            // Get TextureView size (assumed from first surface in list if available, or screen size)
-            // For simplicity, we use a target max width/height or current TextureView size if available
-            var targetWidth = 900
-            var targetHeight = 1200
-            
-            // We can try to access the current view size from binding if needed, but it might be 0 if not laid out.
-            // However, configureTransform passes actual width/height.
-            // Here we just want to choose a camera resolution that matches the ASPECT RATIO of the screen/view ideally,
-            // or just the largest available one that fits.
-            // Let's pick a standard 16:9 or 4:3 resolution closest to 1080p.
-            
             if (map != null) {
-                 val supportedSizes = map.getOutputSizes(SurfaceTexture::class.java).toList()
-                 previewSize = chooseOptimalSize(supportedSizes.toTypedArray(), 900, 1200)
-                 Log.d("Camera2", "Selected preview size: ${previewSize?.width}x${previewSize?.height}")
+                val supportedSizes = map.getOutputSizes(SurfaceTexture::class.java).toList()
+                previewSize = chooseOptimalSize(supportedSizes.toTypedArray(), 900, 1200)
             }
 
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -518,40 +818,27 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             Log.e("Camera2", "Failed to open camera", e)
         }
     }
-    
+
     private fun chooseOptimalSize(choices: Array<Size>, textureViewWidth: Int, textureViewHeight: Int): Size {
-        // Collect the supported resolutions that are at least as big as the preview Surface
         val bigEnough = ArrayList<Size>()
-        // Collect the supported resolutions that are smaller than the preview Surface
         val notBigEnough = ArrayList<Size>()
-        
-        // We try to find a size that matches the aspect ratio of the texture view if possible, 
-        // but since texture view might be stretched/full screen, we prioritize standard aspect ratios like 16:9 or 4:3
-        // For AR glasses, usually 16:9 (1920x1080) is preferred.
-        
         for (option in choices) {
-            // Check for 16:9 aspect ratio roughly (1920/1080 = 1.777)
-            // or just pick the one closest to textureViewWidth x textureViewHeight
-            // Here we simply collect all
             if (option.width >= textureViewWidth && option.height >= textureViewHeight) {
                 bigEnough.add(option)
             } else {
                 notBigEnough.add(option)
             }
         }
+        return when {
+            bigEnough.isNotEmpty() -> Collections.min(bigEnough) { lhs, rhs ->
+                java.lang.Long.signum(lhs.width.toLong() * lhs.height - rhs.width.toLong() * rhs.height)
+            }
 
-        // Pick the smallest of those big enough. If there is no one big enough, pick the largest of those not big enough.
-        if (bigEnough.size > 0) {
-            return Collections.min(bigEnough) { lhs, rhs ->
+            notBigEnough.isNotEmpty() -> Collections.max(notBigEnough) { lhs, rhs ->
                 java.lang.Long.signum(lhs.width.toLong() * lhs.height - rhs.width.toLong() * rhs.height)
             }
-        } else if (notBigEnough.size > 0) {
-            return Collections.max(notBigEnough) { lhs, rhs ->
-                java.lang.Long.signum(lhs.width.toLong() * lhs.height - rhs.width.toLong() * rhs.height)
-            }
-        } else {
-            Log.e("Camera2", "Couldn't find any suitable preview size")
-            return choices[0]
+
+            else -> choices[0]
         }
     }
 
@@ -580,16 +867,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun setUpImageReader(camera: CameraDevice) {
         imageReader?.close()
-        // Use dynamically selected preview size or fallback to 900x1200 (3:4)
         val pWidth = previewSize?.width ?: 900
         val pHeight = previewSize?.height ?: 1200
-        
-        // OPTIMIZATION: Use JPEG format for hardware encoding and direct saving
-        imageReader = ImageReader.newInstance(pWidth, pHeight, ImageFormat.JPEG, 2)
-        
+
+        imageReader = ImageReader.newInstance(pWidth, pHeight, android.graphics.ImageFormat.JPEG, 2)
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-            
             lifecycleScope.launch(Dispatchers.IO) {
                 var imageClosed = false
                 try {
@@ -599,61 +882,59 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                     image.close()
                     imageClosed = true
 
-                    // Decode bitmap
                     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    
-                    // Rotate bitmap (90 degrees as per capture request)
-                    val matrix = Matrix()
-                    matrix.postRotate(90f)
+                    val matrix = Matrix().apply { postRotate(90f) }
                     val rotatedBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-                    
-                    // Crop bottom 50% height
-                    // Top: 50%, Height: 50%
+
                     val cropY = (rotatedBitmap.height * 0.50).toInt()
                     val cropHeight = (rotatedBitmap.height * 0.50).toInt()
-                    
-                    // Ensure bounds are valid
                     val finalY = cropY.coerceIn(0, rotatedBitmap.height)
                     val finalHeight = cropHeight.coerceAtMost(rotatedBitmap.height - finalY)
-                    
                     val croppedBitmap = Bitmap.createBitmap(rotatedBitmap, 0, finalY, rotatedBitmap.width, finalHeight)
-                    
+
                     val photoFile = File(
                         getExternalFilesDir(Environment.DIRECTORY_PICTURES),
-                        SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-                            .format(System.currentTimeMillis()) + ".jpg"
+                        "${System.currentTimeMillis()}.jpg"
                     )
-                    
+
                     FileOutputStream(photoFile).use { fos ->
-                        croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 100, fos)
+                        croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 95, fos)
                     }
-                    
-                    // Recycle bitmaps to save memory
+
                     bitmap.recycle()
                     rotatedBitmap.recycle()
-                    // croppedBitmap will be recycled by GC
-                    
                     currentPhotoFile = photoFile
-                    
-                    val uri = Uri.fromFile(photoFile)
+
                     withContext(Dispatchers.Main) {
-                        showPhotoReview(uri)
+                        if (pendingAutoUpload && currentMode == UiMode.STREAMING) {
+                            viewModel.uploadPhoto(photoFile) {
+                                uploadInFlight.set(false)
+                            }
+                        } else {
+                            uploadInFlight.set(false)
+                            showPhotoReview(Uri.fromFile(photoFile))
+                        }
+                        pendingAutoUpload = false
                     }
                 } catch (e: Exception) {
                     Log.e("Camera2", "Save photo failed", e)
+                    uploadInFlight.set(false)
+                    pendingAutoUpload = false
                     withContext(Dispatchers.Main) {
                         showCustomToast("保存照片失败: ${e.message}")
                     }
                 } finally {
                     if (!imageClosed) {
-                        try { image.close() } catch (e: Exception) {}
+                        try {
+                            image.close()
+                        } catch (_: Exception) {
+                        }
                     }
                 }
             }
         }, backHandler)
 
         try {
-            // OPTIMIZATION: Do NOT add imageReader surface to preview request
             val captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 for (surface in surfaceList) {
                     addTarget(surface)
@@ -667,7 +948,6 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 outputConfigs.add(OutputConfiguration(surface))
             }
 
-            // Using SessionConfiguration for Android P+ (API 28+)
             val sessionConfig = SessionConfiguration(
                 SessionConfiguration.SESSION_REGULAR,
                 outputConfigs,
@@ -692,7 +972,6 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 }
             )
             camera.createCaptureSession(sessionConfig)
-
         } catch (e: Exception) {
             Log.e("Camera2", "Create capture session failed", e)
         }
@@ -703,26 +982,18 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             val session = cameraCaptureSession ?: return
             val device = cameraDevice ?: return
             val reader = imageReader ?: return
-
-            // Create a still capture request
             val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             captureBuilder.addTarget(reader.surface)
-            
-            // Also add preview surface to prevent flicker (optional but recommended)
             for (surface in surfaceList) {
                 captureBuilder.addTarget(surface)
             }
-
-            // Use the same AE/AF modes as preview
             captureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             captureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            
-            // Hardware rotation
             captureBuilder.set(CaptureRequest.JPEG_ORIENTATION, 90)
-
             session.capture(captureBuilder.build(), null, backHandler)
-            
         } catch (e: Exception) {
+            uploadInFlight.set(false)
+            pendingAutoUpload = false
             Log.e("Camera2", "Take photo failed", e)
             showCustomToast("拍照失败")
         }
@@ -736,8 +1007,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             cameraDevice = null
             imageReader?.close()
             imageReader = null
-            previewSize = null // 重置 previewSize 以确保下次启动时的行为一致性
-            
+            previewSize = null
             for (surface in surfaceList) {
                 surface.release()
             }
@@ -746,9 +1016,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             Log.e("Camera2", "Close camera failed", e)
         }
     }
-    
+
     private fun showPhotoReview(uri: Uri) {
-        updateGameState(GameState.PHOTO_REVIEW)
         mBindingPair.updateView {
             layoutPhotoReviewContainer.visibility = View.VISIBLE
             imagePhotoReview.setImageURI(uri)
