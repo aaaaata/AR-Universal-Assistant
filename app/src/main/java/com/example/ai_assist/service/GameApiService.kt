@@ -21,7 +21,8 @@ interface GameApiService {
     @POST("api/analyze-hand")
     suspend fun analyzeHand(
         @Part image: MultipartBody.Part,
-        @Part("session_id") sessionId: RequestBody
+        @Part("session_id") sessionId: RequestBody,
+        @Part("rule_profile") ruleProfile: RequestBody
     ): AnalyzeResponse
 
     @Multipart

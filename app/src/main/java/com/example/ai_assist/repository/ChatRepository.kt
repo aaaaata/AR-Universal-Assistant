@@ -39,13 +39,14 @@ class ChatRepository(apiService: GameApiService) {
         }
     }
 
-    suspend fun analyzeImage(imageFile: File, sessionId: String) {
+    suspend fun analyzeImage(imageFile: File, sessionId: String, ruleProfile: String = "guangdong") {
         try {
             val requestFile = imageFile.asRequestBody("image/jpeg".toMediaTypeOrNull())
             val body = MultipartBody.Part.createFormData("image", imageFile.name, requestFile)
             val sessionBody = sessionId.toRequestBody("text/plain".toMediaTypeOrNull())
+            val ruleProfileBody = ruleProfile.toRequestBody("text/plain".toMediaTypeOrNull())
 
-            val response = apiService.analyzeHand(body, sessionBody)
+            val response = apiService.analyzeHand(body, sessionBody, ruleProfileBody)
             _analyzeResult.value = response
         } catch (e: Exception) {
             e.printStackTrace()

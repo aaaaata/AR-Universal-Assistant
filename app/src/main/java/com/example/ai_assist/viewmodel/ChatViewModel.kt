@@ -27,7 +27,14 @@ class ChatViewModel(
             AnalyzeResponse(
                 userHand = MahjongMapper.mapListToUnicode(it.userHand),
                 meldedTiles = MahjongMapper.mapListToUnicode(it.meldedTiles),
-                suggestedPlay = MahjongMapper.mapToUnicode(it.suggestedPlay)
+                suggestedPlay = MahjongMapper.mapToUnicode(it.suggestedPlay),
+                ruleProfile = it.ruleProfile,
+                recognitionConfidence = it.recognitionConfidence,
+                suggestionConfidence = it.suggestionConfidence,
+                annotatedImagePath = it.annotatedImagePath,
+                actionDetected = it.actionDetected,
+                warning = it.warning,
+                isStable = it.isStable
             )
         }
     }

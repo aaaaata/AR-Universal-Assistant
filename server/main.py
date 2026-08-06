@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
@@ -12,6 +12,7 @@ import socket
 import database
 import asyncio
 import logging
+import json
 from config import config
 from mahjong_state_tracker import MahjongStateTracker
 from mahjong.tile import TilesConverter
@@ -24,6 +25,11 @@ from schemas import (
     AnalyzeResponse, 
     EndSessionRequest, 
     ProcessAudioResponse
+)
+from rule_profiles import (
+    DEFAULT_RULE_PROFILE_ID,
+    normalize_rule_profile_id,
+    validate_rule_profile_config,
 )
 
 # Configure Logging
@@ -39,6 +45,11 @@ EFFICIENCY_ENGINE = EfficiencyEngine()
 LATEST_ANALYZE_RESULTS: Dict[str, Dict[str, Any]] = {}
 UPLOAD_RETENTION_HOURS = int(os.getenv("UPLOAD_RETENTION_HOURS", "24"))
 UPLOAD_MAX_FILES = int(os.getenv("UPLOAD_MAX_FILES", "1500"))
+
+def schema_to_dict(model: Any) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
 
 def get_best_lan_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -190,6 +201,9 @@ async def mock_suggestions_ws(websocket: WebSocket, session_id: str):
                     "suggested_play": "等待新一帧分析结果",
                     "user_hand": [],
                     "melded_tiles": [],
+                    "rule_profile": DEFAULT_RULE_PROFILE_ID,
+                    "recognition_confidence": None,
+                    "suggestion_confidence": None,
                 }
             await websocket.send_json(latest)
             await asyncio.sleep(1)
@@ -208,14 +222,31 @@ async def start_session(request: StartSessionRequest):
 async def analyze_hand(
     image: UploadFile = File(...),
     session_id: str = Form(...),
-    incoming_tile: Optional[str] = Form(None)
+    incoming_tile: Optional[str] = Form(None),
+    rule_profile: str = Form(DEFAULT_RULE_PROFILE_ID),
+    rule_profile_config: Optional[str] = Form(None),
 ):
     start_time = datetime.datetime.now()
     steps_log = []
+    active_rule_profile = normalize_rule_profile_id(rule_profile)
+
+    if rule_profile_config:
+        try:
+            custom_config = json.loads(rule_profile_config)
+            custom_profile = validate_rule_profile_config(custom_config)
+            if active_rule_profile != DEFAULT_RULE_PROFILE_ID and active_rule_profile != custom_profile.id:
+                raise ValueError("rule_profile must match rule_profile_config.id")
+            active_rule_profile = custom_profile.id
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid rule_profile_config: {exc}") from exc
     
     # Step 1: Initialize
-    logger.info(f"Received Analyze request: session_id={session_id}, filename={image.filename}")
+    logger.info(
+        f"Received Analyze request: session_id={session_id}, "
+        f"filename={image.filename}, rule_profile={active_rule_profile}"
+    )
     steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Received request with image: {image.filename}")
+    steps_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Rule profile: {active_rule_profile}")
     
     # Step 2: Ensure Session Exists
     database.create_or_update_session(session_id)
@@ -372,6 +403,9 @@ async def analyze_hand(
         user_hand=user_hand,
         melded_tiles=melded_tiles,
         suggested_play=suggested_play, 
+        rule_profile=active_rule_profile,
+        recognition_confidence=None,
+        suggestion_confidence=None,
         annotated_image_path=annotated_path,
         action_detected=action_detected,
         warning=warning_msg,
@@ -387,7 +421,7 @@ async def analyze_hand(
         session_id=session_id,
         image_path=relative_image_path,
         steps=steps_log,
-        response=response_data.dict()
+        response=schema_to_dict(response_data)
     )
 
     latest_payload = {
@@ -396,6 +430,9 @@ async def analyze_hand(
         "suggested_play": suggested_play,
         "user_hand": user_hand,
         "melded_tiles": melded_tiles,
+        "rule_profile": active_rule_profile,
+        "recognition_confidence": None,
+        "suggestion_confidence": None,
         "annotated_image_path": annotated_path,
         "action_detected": action_detected,
         "warning": warning_msg,
