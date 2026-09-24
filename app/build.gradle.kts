@@ -42,6 +42,8 @@ android {
 }
 
 dependencies {
+    implementation(project(":sdk:sdk-core"))
+    implementation(project(":scene-mahjong"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

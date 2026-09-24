@@ -21,3 +21,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "ARMahjongAssist"
 include(":app")
+include(":sdk:sdk-core")
+include(":scene-mahjong")
