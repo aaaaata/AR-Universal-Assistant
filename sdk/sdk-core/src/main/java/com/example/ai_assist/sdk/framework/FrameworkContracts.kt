@@ -1,5 +1,7 @@
 package com.example.ai_assist.sdk.framework
 
+import android.view.ViewGroup
+import java.io.File
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,8 +31,27 @@ interface SceneConfig
 /** 硬件能力配置占位。图像尺寸、格式和相机参数以后在这里填。 */
 interface CapabilityConfig
 
-/** 一帧待提交的图像占位。 */
-interface Frame
+/** 镜腿或触控产生的输入动作。 */
+enum class InputAction {
+    CLICK,
+    DOUBLE_CLICK,
+    TRIPLE_CLICK,
+    LONG_PRESS,
+    SLIDE_FORWARD,
+    SLIDE_BACKWARD,
+    SLIDE_UP,
+    SLIDE_DOWN
+}
+
+/**
+ * 一帧已编码的图像。
+ * 场景上传后负责删除 [file]。
+ */
+data class Frame(
+    val file: File,
+    val imageRotationDegrees: Int,
+    val capturedAtMillis: Long
+)
 
 /** 一个场景会话占位。 */
 interface Session
@@ -93,6 +114,8 @@ sealed interface SdkEvent {
         override val sessionId: String,
         override val sequenceId: Long?,
         override val occurredAtMillis: Long,
+        val code: String,
+        val message: String,
         val recoverable: Boolean
     ) : SdkEvent
 
@@ -101,7 +124,8 @@ sealed interface SdkEvent {
         override val sessionId: String,
         override val sequenceId: Long?,
         override val occurredAtMillis: Long,
-        val code: String
+        val code: String,
+        val message: String
     ) : SdkEvent
 }
 
@@ -110,7 +134,7 @@ sealed interface SdkEvent {
  * 默认 1 秒一帧；上一帧未完成时不发出新帧。场景不得自己打开或释放相机。
  */
 interface CameraScheduler {
-    fun frames(intervalMillis: Long): Flow<Frame>
+    fun frames(intervalMillis: Long, cameraConfig: CapabilityConfig): Flow<Frame>
 }
 
 /** 活动场景可见的会话入口。填业务逻辑时只使用这些成员，不再改签名。 */
@@ -118,13 +142,27 @@ interface SceneContext {
     val sessionId: String
     val config: SceneConfig
     val cameraScheduler: CameraScheduler
+
+    /** 已租到的能力。场景不能自己创建或释放相机。 */
     fun requireCapability(type: CapabilityType): CapabilityLease
+
+    /** 本场景的接口密钥。未配置时返回 null，不得写入普通配置或日志。 */
+    fun credential(): String?
+
+    /** 当前会话的输入动作。没有输入能力时为空流。 */
+    val inputActions: Flow<InputAction>
+
+    /** 单帧失败用 recoverable=true，会话保持 RUNNING。 */
+    suspend fun reportError(code: String, message: String, recoverable: Boolean)
+
+    /** 诊断信息，不包含密钥。 */
+    suspend fun reportDiagnostic(code: String, message: String)
 }
 
 /** 场景结果渲染器。 */
 interface SceneRenderer {
     val rendererKey: String
-    fun render(content: SceneContent)
+    fun render(container: ViewGroup, content: SceneContent)
     fun clear()
 }
 
@@ -145,7 +183,11 @@ interface CvGameCore {
     fun registerScene(provider: SceneProvider)
     fun unregisterScene(sceneId: String)
     fun getScenes(): List<SceneProvider>
-    fun startScene(sceneId: String): Flow<SdkEvent>
+    /**
+     * 启动场景。
+     * [sessionConfig] 不为空时覆盖场景默认配置，只对这一局生效。
+     */
+    fun startScene(sceneId: String, sessionConfig: SceneConfig? = null): Flow<SdkEvent>
     fun stopScene()
     fun getCurrentState(): SdkState
     fun onAppBackground()

@@ -1,5 +1,6 @@
 package com.example.ai_assist.scene.mahjong.framework
 
+import android.view.ViewGroup
 import com.example.ai_assist.sdk.framework.CapabilityType
 import com.example.ai_assist.sdk.framework.SceneConfig
 import com.example.ai_assist.sdk.framework.SceneContent
@@ -41,7 +42,7 @@ interface MahjongFieldMapper {
 class MahjongRenderer : SceneRenderer {
     override val rendererKey: String = MahjongScenePayload.RENDERER_KEY
 
-    override fun render(content: SceneContent) {
+    override fun render(container: ViewGroup, content: SceneContent) {
         TODO("渲染手牌、副露、进张、建议与置信度")
     }
 
