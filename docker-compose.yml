@@ -1,15 +1,18 @@
 services:
   backend:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     container_name: mahjong_backend
     ports:
       - "8000:8000"
     volumes:
-      - ./server:/app
-    env_file:
-      - server/.env
+      - ./server/data:/app/server/data
+    environment:
+      CLOUD_HOST: 0.0.0.0
+      CLOUD_PORT: 8000
+      CLOUD_WORKERS: 1
+      CLOUD_RUNTIME_ENV: local
+      CLOUD_API_KEY: ${CLOUD_API_KEY:-local-token}
     restart: unless-stopped
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 

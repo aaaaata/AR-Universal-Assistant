@@ -14,7 +14,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.ai_assist"
+        applicationId = "com.example.ai_assist.cloudmigration"
         minSdk = 31
         targetSdk = 36
         versionCode = 1

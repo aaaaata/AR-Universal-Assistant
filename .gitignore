@@ -43,6 +43,7 @@ pip-delete-this-directory.txt
 .vscode/
 
 # Project Specific
+server/data/
 server/static/uploads/
 temp_aar/
 server/realtimesst.log

@@ -1,0 +1,9 @@
+{
+  "runtime": "ultralytics",
+  "model_path": "../../models/tile/yolo26m_mahjong_detect_finetune.pt",
+  "model_version": "yolo26m-mahjong-detect-finetune-v1",
+  "predict_args": {
+    "device": "cpu"
+  },
+  "class_mapping": {}
+}

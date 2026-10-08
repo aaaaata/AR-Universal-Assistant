@@ -2,6 +2,7 @@ package com.example.ai_assist.storage
 
 import android.content.Context
 import com.example.ai_assist.AppConfig
+import com.example.ai_assist.connection.ServerConnectionQrParser
 import com.example.ai_assist.model.ConnectionConfig
 import org.json.JSONObject
 
@@ -22,12 +23,16 @@ class ConnectionConfigStore(context: Context) {
     }
 
     fun parse(raw: String): ConnectionConfig? {
+        if (raw.trim().startsWith("rayneo-assist://", ignoreCase = true)) {
+            return runCatching { ServerConnectionQrParser.parse(raw) }.getOrNull()
+        }
         return runCatching {
             val json = JSONObject(raw)
             val serverUrl = normalizeUrl(json.getString("serverUrl"))
             ConnectionConfig(
                 version = json.optInt("version", 1),
                 serverUrl = serverUrl,
+                sceneId = json.optString("sceneId", "mahjong"),
                 streamUrl = json.optString("streamUrl").takeIf { it.isNotBlank() },
                 fps = json.optInt("fps", AppConfig.DEFAULT_CAPTURE_FPS).coerceIn(1, AppConfig.MAX_CAPTURE_FPS),
                 sessionKey = json.optString("sessionKey").takeIf { it.isNotBlank() },
@@ -40,6 +45,7 @@ class ConnectionConfigStore(context: Context) {
         return JSONObject().apply {
             put("version", config.version)
             put("serverUrl", normalizeUrl(config.serverUrl))
+            put("sceneId", config.sceneId)
             config.streamUrl?.let { put("streamUrl", it) }
             put("fps", config.fps)
             config.sessionKey?.let { put("sessionKey", it) }

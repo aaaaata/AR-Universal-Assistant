@@ -1,0 +1,12 @@
+{
+  "runtime": "onnx",
+  "model_path": "/app/models/region/weights.onnx",
+  "class_names_path": "/app/models/region/class_names.txt",
+  "model_version": "external-region-model-v1",
+  "confidence_threshold": 0.3,
+  "iou_threshold": 0.5,
+  "class_mapping": {
+    "hand": "hand",
+    "meld": "meld"
+  }
+}

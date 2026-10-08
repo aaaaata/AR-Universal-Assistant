@@ -1,53 +1,34 @@
-# Stage 1: Builder
-FROM python:3.9-slim as builder
+FROM ac2-registry.cn-hangzhou.cr.aliyuncs.com/ac2/base:alinux3.2104-py312
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    YOLO_CONFIG_DIR=/tmp/Ultralytics \
+    CLOUD_HOST=0.0.0.0 \
+    CLOUD_PORT=8080 \
+    CLOUD_WORKERS=3 \
+    CLOUD_REGION_MANIFEST=/app/server/models/region.manifest.json \
+    CLOUD_TILE_MANIFEST=/app/server/models/tile.manifest.json
 
-# Install system dependencies for build
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+COPY server/requirements.txt /app/server/requirements.txt
 
-COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+RUN mkdir -p /app/success_log /app/error_log /app/server/data \
+    && touch /app/healthy \
+    && if command -v yum >/dev/null 2>&1; then \
+         yum install -y hostname libgomp mesa-libGL glib2 && yum clean all; \
+       elif command -v apt-get >/dev/null 2>&1; then \
+         apt-get update && apt-get install -y --no-install-recommends hostname libgomp1 libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*; \
+       fi \
+    && python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r /app/server/requirements.txt
 
-# Stage 2: Runtime
-FROM python:3.9-slim
+COPY server /app/server
+COPY tools /app/tools
+COPY models/region/yolo26_hand_detect.pt /app/models/region/yolo26_hand_detect.pt
+COPY models/tile/yolo26m_mahjong_detect_finetune.pt /app/models/tile/yolo26m_mahjong_detect_finetune.pt
 
-WORKDIR /app
+EXPOSE 8080
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="/home/appuser/.local/bin:$PATH"
-
-# Install system dependencies for runtime (if any, e.g. for opencv)
-# opencv-python-headless usually doesn't need libgl1, but if using standard opencv, we'd need it.
-# faster-whisper might need some libs.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 \
-    libxcb1 \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
-# Copy installed packages from builder
-COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
-
-# Copy application code
-COPY --chown=appuser:appuser . .
-
-# Set ownership (redundant if COPY --chown is used, but safe to keep for other files if any)
-# RUN chown -R appuser:appuser /app
-
-# Switch to non-root user
-USER appuser
-
-EXPOSE 8000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn server.app:app --host ${CLOUD_HOST:-0.0.0.0} --port ${CLOUD_PORT:-8080} --workers ${CLOUD_WORKERS:-3}"]

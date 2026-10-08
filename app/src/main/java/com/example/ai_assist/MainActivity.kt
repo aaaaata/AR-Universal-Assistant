@@ -1,6 +1,7 @@
 package com.example.ai_assist
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -124,9 +125,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 return@registerForActivityResult
             }
 
-            configStore.save(parsed)
-            showCustomToast("配置已保存")
-            applyConnectionConfig(parsed, startStreaming = true)
+            validateAndApplyConnection(parsed, persistOnSuccess = true)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -145,12 +144,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         observeViewModel()
         checkPermissions()
 
-        val savedConfig = configStore.load()
-        if (savedConfig == null) {
-            showConfigMode()
-        } else {
-            applyConnectionConfig(savedConfig, startStreaming = true)
-        }
+        activeConfig = configStore.load()
+        configFocusIndex = if (activeConfig == null) 0 else 1
+        showConfigMode()
     }
 
     override fun onResume() {
@@ -223,17 +219,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             btnUseSavedConfig.setOnClickListener {
                 configFocusIndex = 1
                 updateConfigFocusUi()
-                configStore.load()?.let {
-                    applyConnectionConfig(it, startStreaming = true)
-                } ?: showCustomToast("暂无已保存配置")
+                useSavedConnection()
             }
             btnClearConfig.setOnClickListener {
                 configFocusIndex = 2
                 updateConfigFocusUi()
-                configStore.clear()
-                activeConfig = null
-                stopStreaming()
-                showConfigMode()
+                clearSavedConnection()
             }
         }
     }
@@ -297,9 +288,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             return
         }
         if (currentMode == UiMode.CONFIG) {
-            continueWithSavedOrActiveConfig()?.let {
-                return
-            }
+            finish()
+            return
         }
         stopStreaming()
         finish()
@@ -320,7 +310,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun handleSlideBackward() {
         if (currentMode == UiMode.CONFIG) {
-            continueWithSavedOrActiveConfig() ?: showCustomToast("暂无已保存配置")
+            showCustomToast("请选择连接方式")
         } else {
             showConfigMode()
         }
@@ -329,16 +319,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private fun activateFocusedConfigAction() {
         when (configFocusIndex) {
             0 -> launchQrScanner()
-            1 -> {
-                continueWithSavedOrActiveConfig() ?: showCustomToast("暂无已保存配置")
-            }
-            2 -> {
-                configStore.clear()
-                activeConfig = null
-                stopStreaming()
-                showConfigMode()
-                showCustomToast("已清除配置")
-            }
+            1 -> useSavedConnection()
+            2 -> clearSavedConnection()
         }
     }
 
@@ -367,6 +349,63 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         }
     }
 
+    private fun useSavedConnection() {
+        val savedConfig = configStore.load()
+        if (savedConfig == null) {
+            configFocusIndex = 0
+            updateConfigFocusUi()
+            AlertDialog.Builder(this)
+                .setTitle("本地无保存配置")
+                .setMessage("请先选择“扫码连接”配置本地服务。")
+                .setPositiveButton("确定", null)
+                .show()
+            return
+        }
+        validateAndApplyConnection(savedConfig, persistOnSuccess = false)
+    }
+
+    private fun clearSavedConnection() {
+        configStore.clear()
+        activeConfig = null
+        stopStreaming()
+        showConfigMode()
+        showCustomToast("已清除配置")
+    }
+
+    private fun validateAndApplyConnection(config: ConnectionConfig, persistOnSuccess: Boolean) {
+        mBindingPair.updateView {
+            tvStatus.text = "正在连接服务"
+            tvConfigSummary.text = config.serverUrl
+        }
+        lifecycleScope.launch {
+            if (!isServerReady(config.serverUrl)) {
+                showCustomToast("服务不可用，请确认服务端和局域网")
+                mBindingPair.updateView { tvStatus.text = "连接失败" }
+                return@launch
+            }
+            if (persistOnSuccess) {
+                configStore.save(config)
+            }
+            applyConnectionConfig(config, startStreaming = false)
+            mBindingPair.updateView { tvStatus.text = "服务已连接" }
+            showCustomToast(if (persistOnSuccess) "连接成功，配置已保存" else "已连接保存的服务")
+        }
+    }
+
+    private suspend fun isServerReady(baseUrl: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder()
+                .url(baseUrl + "health/ready")
+                .get()
+                .build()
+            streamClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use false
+                val status = JSONObject(response.body?.string().orEmpty()).optString("status")
+                status.equals("ready", ignoreCase = true)
+            }
+        }.getOrDefault(false)
+    }
+
     private fun applyConnectionConfig(config: ConnectionConfig, startStreaming: Boolean) {
         val hasConfigChanged = activeConfig != null && activeConfig != config
         if (hasConfigChanged) {
@@ -378,17 +417,6 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         if (startStreaming) {
             startStreaming()
         }
-    }
-
-    private fun continueWithSavedOrActiveConfig(): ConnectionConfig? {
-        val targetConfig = activeConfig ?: configStore.load() ?: return null
-        if (activeConfig == targetConfig) {
-            updateConnectionSummary(targetConfig)
-            startStreaming()
-            return targetConfig
-        }
-        applyConnectionConfig(targetConfig, startStreaming = true)
-        return targetConfig
     }
 
     private fun updateConnectionSummary(config: ConnectionConfig?) {
@@ -620,11 +648,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     }
 
     private fun toggleConfigMode() {
-        if (currentMode == UiMode.CONFIG) {
-            configStore.load()?.let {
-                applyConnectionConfig(it, startStreaming = true)
-            } ?: showCustomToast("请先扫码配置")
-        } else {
+        if (currentMode != UiMode.CONFIG) {
             showConfigMode()
         }
     }

@@ -1,0 +1,12 @@
+{
+  "runtime": "ultralytics",
+  "model_path": "../../models/region/yolo26_hand_detect.pt",
+  "model_version": "yolo26-hand-detect-local-v1",
+  "predict_args": {
+    "device": "cpu"
+  },
+  "class_mapping": {
+    "hand": "hand",
+    "meld": "meld"
+  }
+}

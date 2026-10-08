@@ -1,0 +1,11 @@
+.git
+.gradle
+.idea
+.venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+app/build
+build
+captures
+server/data
