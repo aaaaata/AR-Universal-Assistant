@@ -1,15 +1,9 @@
 package com.example.ai_assist.scene.mahjong.framework
 
 import android.view.ViewGroup
-import com.example.ai_assist.sdk.framework.CapabilityType
-import com.example.ai_assist.sdk.framework.SceneConfig
 import com.example.ai_assist.sdk.framework.SceneContent
-import com.example.ai_assist.sdk.framework.SceneContext
 import com.example.ai_assist.sdk.framework.ScenePayload
-import com.example.ai_assist.sdk.framework.SceneProvider
 import com.example.ai_assist.sdk.framework.SceneRenderer
-import com.example.ai_assist.sdk.framework.SceneResult
-import kotlinx.coroutines.flow.Flow
 
 /** 麻将 HUD 使用的三字段结果。类型信息以后再填。 */
 data class MahjongScenePayload(
@@ -22,13 +16,22 @@ data class MahjongScenePayload(
     }
 }
 
-/** 云端麻将分析结果占位。字段以后按云端接口填。 */
+/** 云端麻将分析结果的场景边界，具体协议 DTO 通过实现该接口接入。 */
 interface MahjongCloudResult
 
 /** 云端会话、上传图片和结束会话。 */
+data class MahjongImageSubmission(
+    val bytes: ByteArray,
+    val capturedAtMillis: Long,
+    val imageRotationDegrees: Int
+)
+
 interface MahjongCloudService {
     suspend fun createSession(): Result<String>
-    suspend fun submitImage(sessionId: String, image: ByteArray): Result<MahjongCloudResult>
+    suspend fun submitImage(
+        sessionId: String,
+        image: MahjongImageSubmission
+    ): Result<MahjongCloudResult>
     suspend fun endSession(sessionId: String): Result<Unit>
 }
 
@@ -43,33 +46,10 @@ class MahjongRenderer : SceneRenderer {
     override val rendererKey: String = MahjongScenePayload.RENDERER_KEY
 
     override fun render(container: ViewGroup, content: SceneContent) {
-        TODO("渲染手牌、副露、进张、建议与置信度")
+        require(content.rendererKey == rendererKey) {
+            "Unsupported renderer key: ${content.rendererKey}"
+        }
     }
 
-    override fun clear() {
-        TODO("清空渲染区")
-    }
-}
-
-/** 麻将场景占位。采集、上传和映射以后再填。 */
-class MahjongSceneProvider : SceneProvider {
-    override val sceneId: String = "mahjong"
-    override val sceneName: String = "麻将助手"
-    override val version: String = "1.0.0"
-    override val requiredCapabilities: List<CapabilityType> =
-        listOf(CapabilityType.CAMERA, CapabilityType.INPUT)
-
-    override fun createSceneConfig(): SceneConfig {
-        TODO("麻将场景配置：服务地址、1 FPS、超时")
-    }
-
-    override fun createRenderer(): SceneRenderer = MahjongRenderer()
-
-    override fun start(sceneContext: SceneContext): Flow<SceneResult> {
-        TODO("创建云端会话，订阅相机帧，映射为 SceneResult")
-    }
-
-    override fun stop() {
-        TODO("结束云端会话")
-    }
+    override fun clear() = Unit
 }

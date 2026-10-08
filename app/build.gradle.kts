@@ -12,6 +12,9 @@ val cloudServerBaseUrl = providers.gradleProperty("CLOUD_SERVER_BASE_URL")
 require(cloudServerBaseUrl.endsWith('/')) {
     "CLOUD_SERVER_BASE_URL must end with '/': $cloudServerBaseUrl"
 }
+val assistApiKey = providers.gradleProperty("ASSIST_API_KEY").orElse("local-token")
+val localApiKey = providers.gradleProperty("LOCAL_API_KEY").orElse("local-token")
+val cloudApiKey = providers.gradleProperty("CLOUD_API_KEY").orElse(assistApiKey)
 
 android {
     namespace = "com.example.ai_assist"
@@ -36,6 +39,8 @@ android {
             "CLOUD_SERVER_BASE_URL",
             cloudServerBaseUrl.asBuildConfigString()
         )
+        buildConfigField("String", "LOCAL_API_KEY", localApiKey.get().asBuildConfigString())
+        buildConfigField("String", "CLOUD_API_KEY", cloudApiKey.get().asBuildConfigString())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

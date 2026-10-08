@@ -41,10 +41,20 @@ import com.example.ai_assist.connection.CloudServiceConnector
 import com.example.ai_assist.databinding.ActivityMainBinding
 import com.example.ai_assist.connection.HttpServiceReadinessProbe
 import com.example.ai_assist.connection.ServiceReadinessProbe
+import com.example.ai_assist.framework.AndroidResourceManager
+import com.example.ai_assist.framework.Camera2FrameScheduler
+import com.example.ai_assist.framework.registerScenes
 import com.example.ai_assist.model.ConnectionConfig
+import com.example.ai_assist.model.ServiceMode
 import com.example.ai_assist.repository.ChatRepository
+import com.example.ai_assist.scene.mahjong.framework.MahjongSceneConfig
+import com.example.ai_assist.scene.mahjong.framework.MahjongScenePayload
 import com.example.ai_assist.service.GameApiService
 import com.example.ai_assist.service.RayNeoDeviceManager
+import com.example.ai_assist.sdk.framework.CredentialProvider
+import com.example.ai_assist.sdk.framework.DefaultCvGameCore
+import com.example.ai_assist.sdk.framework.SdkEvent
+import com.example.ai_assist.sdk.framework.SdkState
 import com.example.ai_assist.storage.ConnectionConfigStore
 import com.example.ai_assist.utils.RayNeoAudioRecorder
 import com.example.ai_assist.viewmodel.ChatViewModel
@@ -54,6 +64,7 @@ import com.ffalcon.mercury.android.sdk.ui.activity.BaseMirrorActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -92,6 +103,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private var previewSize: Size? = null
     private var currentPhotoFile: File? = null
     private var captureLoopJob: Job? = null
+    private var sceneEventsJob: Job? = null
     private val uploadInFlight = AtomicBoolean(false)
     private var pendingAutoUpload = false
     private var hasStartedCamera = false
@@ -113,6 +125,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private var isPrimaryConnected = false
     private var isSuggestionStreamConnected = false
     private var isCloudConnectionInFlight = false
+    private var isCloudServiceReady = false
+    private lateinit var frameScheduler: Camera2FrameScheduler
+    private lateinit var sceneCore: DefaultCvGameCore
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -150,6 +165,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         backHandlerThread.start()
         backHandler = Handler(backHandlerThread.looper)
 
+        setupFrameworkRuntime()
         setupDependencies()
         setupUI()
         observeViewModel()
@@ -162,8 +178,10 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     override fun onResume() {
         super.onResume()
+        if (::sceneCore.isInitialized) sceneCore.onAppForeground()
         if (currentMode == UiMode.STREAMING && !hasStartedCamera) {
             startStreamingUi()
+            activeConfig?.let(::startFrameworkScene)
         }
     }
 
@@ -172,6 +190,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         disconnectSuggestionStream()
         stopAudioRecording(silent = true)
         closeCamera()
+        if (::sceneCore.isInitialized) sceneCore.onAppBackground()
         super.onPause()
     }
 
@@ -180,6 +199,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         disconnectSuggestionStream()
         closeCamera()
         stopAudioRecording(silent = true)
+        sceneEventsJob?.cancel()
+        if (::sceneCore.isInitialized) sceneCore.close()
+        if (::frameScheduler.isInitialized) frameScheduler.close()
         cameraExecutor.shutdown()
         backHandlerThread.quitSafely()
         streamClient.dispatcher.executorService.shutdown()
@@ -202,6 +224,21 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         audioRecorder = RayNeoAudioRecorder(this) { file ->
             viewModel.uploadAudio(file)
         }
+    }
+
+    private fun setupFrameworkRuntime() {
+        frameScheduler = Camera2FrameScheduler(applicationContext)
+        sceneCore = DefaultCvGameCore(
+            cameraScheduler = frameScheduler,
+            resourceManager = AndroidResourceManager(frameScheduler),
+            credentialProvider = CredentialProvider {
+                when (activeConfig?.serviceMode) {
+                    ServiceMode.CLOUD -> BuildConfig.CLOUD_API_KEY
+                    else -> BuildConfig.LOCAL_API_KEY
+                }
+            }
+        )
+        registerScenes(sceneCore)
     }
 
     private fun setupUI() {
@@ -366,7 +403,10 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         when (currentMode) {
             UiMode.SERVICE_SELECTION -> showCustomToast("请选择连接方式")
             UiMode.CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
-            UiMode.STREAMING -> showConfigMode()
+            UiMode.STREAMING -> {
+                stopStreaming()
+                showConfigMode()
+            }
         }
     }
 
@@ -440,7 +480,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             if (persistOnSuccess) {
                 configStore.save(config)
             }
-            applyConnectionConfig(config, startStreaming = false)
+            applyConnectionConfig(config, startStreaming = !persistOnSuccess)
             mBindingPair.updateView { tvStatus.text = "服务已连接" }
             showCustomToast(if (persistOnSuccess) "连接成功，配置已保存" else "已连接保存的服务")
         }
@@ -449,6 +489,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private fun applyConnectionConfig(config: ConnectionConfig, startStreaming: Boolean) {
         val hasConfigChanged = activeConfig != null && activeConfig != config
         if (hasConfigChanged) {
+            sceneCore.stopScene()
             viewModel.endCurrentSession()
         }
         activeConfig = config
@@ -519,6 +560,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun showCloudConfigMode() {
         currentMode = UiMode.CLOUD_CONFIG
+        isCloudServiceReady = false
         stopCaptureLoop()
         closeCamera()
         mBindingPair.updateView {
@@ -535,12 +577,17 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutInstructionGaming.visibility = View.GONE
             tvInstructionIdle.visibility = View.GONE
             tvCloudEndpoint.text = AppConfig.CLOUD_SERVER_BASE_URL
+            btnRetryCloudConnection.text = "重新连接"
         }
         connectCloudService()
     }
 
     private fun connectCloudService() {
         if (currentMode != UiMode.CLOUD_CONFIG || isCloudConnectionInFlight) return
+        if (isCloudServiceReady && activeConfig?.serviceMode == ServiceMode.CLOUD) {
+            startStreaming()
+            return
+        }
         isCloudConnectionInFlight = true
         mBindingPair.updateView {
             tvCloudConnectionStatus.text = "正在连接云端服务..."
@@ -553,41 +600,35 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             if (currentMode != UiMode.CLOUD_CONFIG) return@launch
             result
                 .onSuccess { config ->
-                    activeConfig = config
+                    applyConnectionConfig(config, startStreaming = false)
+                    isCloudServiceReady = true
                     mBindingPair.updateView {
                         tvCloudConnectionStatus.text = "云端服务连接成功"
                         tvCloudConnectionStatus.setTextColor(getColor(R.color.neon_green))
                         tvCloudEndpoint.text = config.serverUrl
                         btnRetryCloudConnection.isEnabled = true
+                        btnRetryCloudConnection.text = "启动麻将场景"
                     }
                 }
                 .onFailure {
+                    isCloudServiceReady = false
                     mBindingPair.updateView {
                         tvCloudConnectionStatus.text = "云端服务连接失败"
                         tvCloudConnectionStatus.setTextColor(getColor(android.R.color.holo_red_light))
                         btnRetryCloudConnection.isEnabled = true
+                        btnRetryCloudConnection.text = "重新连接"
                     }
                 }
         }
     }
 
     private fun startStreaming() {
+        val config = activeConfig ?: return
         currentMode = UiMode.STREAMING
         isPrimaryConnected = false
         isSuggestionStreamConnected = false
         startStreamingUi()
-        connectSuggestionStream()
-        lifecycleScope.launch {
-            val started = viewModel.ensureSessionStarted()
-            if (!started) {
-                showCustomToast("无法建立会话")
-                showConfigMode()
-                return@launch
-            }
-            isPrimaryConnected = true
-            refreshConnectionStatus()
-            startCaptureLoop(activeConfig?.fps ?: AppConfig.DEFAULT_CAPTURE_FPS)
-        }
+        startFrameworkScene(config)
     }
 
     private fun startStreamingUi() {
@@ -599,20 +640,19 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutInstructionGaming.visibility = View.GONE
             tvStreamGestureHint.visibility = View.GONE
             tvInstructionIdle.visibility = View.GONE
-            tvStatus.visibility = View.GONE
+            tvStatus.visibility = View.VISIBLE
             tvConnectionSummary.visibility = View.GONE
             viewConnectionIndicator.visibility = View.VISIBLE
-            cardCameraPreview.visibility = View.VISIBLE
+            cardCameraPreview.visibility = View.GONE
             tvInstructionCameraPreview.visibility = View.GONE
             layoutPhotoReviewContainer.visibility = View.GONE
-            tvStatus.text = activeConfig?.label ?: "运行中"
+            tvStatus.text = "正在启动麻将场景"
             tvConnectionSummary.text = activeConfig?.let {
                 "${it.label ?: "已连"}  ${it.fps} fps"
             } ?: "未配置连接"
             tvConnectionStatus.text = "已连接"
             tvStreamGestureHint.text = "录 | 设 | 退"
         }
-        startCamera()
     }
 
     private fun stopStreaming() {
@@ -621,7 +661,90 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         disconnectSuggestionStream()
         stopAudioRecording(silent = true)
         closeCamera()
+        sceneCore.stopScene()
+        sceneEventsJob?.cancel()
+        sceneEventsJob = null
         viewModel.endCurrentSession()
+    }
+
+    private fun startFrameworkScene(connection: ConnectionConfig) {
+        sceneEventsJob?.cancel()
+        val fps = connection.fps.coerceIn(1, AppConfig.MAX_CAPTURE_FPS)
+        val sceneConfig = MahjongSceneConfig(
+            serverBaseUrl = connection.serverUrl,
+            captureIntervalMillis = 1_000L / fps
+        )
+        sceneEventsJob = lifecycleScope.launch {
+            runCatching {
+                if (sceneCore.getCurrentState() != SdkState.READY) {
+                    sceneCore.state.first { it == SdkState.READY || it == SdkState.ERROR }
+                }
+                if (sceneCore.getCurrentState() == SdkState.ERROR) {
+                    sceneCore.onAppForeground()
+                }
+                sceneCore.startScene(MAHJONG_SCENE_ID, sceneConfig).collect(::handleSdkEvent)
+            }.onFailure { error ->
+                Log.e("MahjongFramework", "Unable to start Mahjong scene", error)
+                showCustomToast("麻将场景启动失败: ${error.message}")
+                mBindingPair.updateView {
+                    tvStatus.text = "麻将场景启动失败"
+                    tvStatus.setTextColor(getColor(android.R.color.holo_red_light))
+                }
+            }
+        }
+    }
+
+    private fun handleSdkEvent(event: SdkEvent) {
+        when (event) {
+            is SdkEvent.StateChanged -> handleSdkState(event.state)
+            is SdkEvent.ResultReceived -> {
+                val payload = event.result.content?.scenePayload as? MahjongScenePayload ?: return
+                Log.i(
+                    "MahjongFramework",
+                    "event=result_received sequence_id=${event.result.sequenceId} " +
+                        "status=${event.result.summary.status}"
+                )
+                isPrimaryConnected = true
+                mBindingPair.updateView {
+                    tvContentHand.text = formatMahjongText(payload.userHand.joinToString(" "))
+                    tvContentSuggested.text = formatMahjongText(payload.meldedTiles.joinToString(" "))
+                    tvContentWaiting.text = formatMahjongText(payload.suggestedPlay)
+                    tvStatus.text = event.result.summary.status
+                    tvStatus.setTextColor(getColor(R.color.neon_green))
+                }
+                refreshConnectionStatus()
+            }
+            is SdkEvent.ErrorOccurred -> {
+                Log.e("MahjongFramework", "${event.code}: ${event.message}")
+                mBindingPair.updateView {
+                    tvStatus.text = if (event.recoverable) "单帧失败，继续采集" else "场景错误"
+                    tvStatus.setTextColor(getColor(android.R.color.holo_red_light))
+                }
+            }
+            is SdkEvent.DiagnosticReported -> {
+                Log.i("MahjongFramework", "${event.code}: ${event.message}")
+                if (event.code == "MAHJONG_SESSION_CREATED") {
+                    isPrimaryConnected = true
+                    mBindingPair.updateView {
+                        tvStatus.text = "云端麻将会话已启动"
+                        tvStatus.setTextColor(getColor(R.color.neon_green))
+                    }
+                    refreshConnectionStatus()
+                }
+            }
+        }
+    }
+
+    private fun handleSdkState(state: SdkState) {
+        val text = when (state) {
+            SdkState.STARTING -> "正在创建麻将会话"
+            SdkState.RUNNING -> "正在等待相机帧"
+            SdkState.STOPPING -> "正在结束麻将会话"
+            SdkState.READY -> "麻将场景已停止"
+            SdkState.ERROR -> "麻将场景错误"
+            SdkState.UNINITIALIZED -> "框架未初始化"
+        }
+        mBindingPair.updateView { tvStatus.text = text }
     }
 
     private fun connectSuggestionStream() {
@@ -1176,5 +1299,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 tvCustomToast.visibility = View.GONE
             }, 2000)
         }
+    }
+
+    private companion object {
+        const val MAHJONG_SCENE_ID = "mahjong"
     }
 }

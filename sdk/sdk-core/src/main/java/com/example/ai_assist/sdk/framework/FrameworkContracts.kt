@@ -28,6 +28,11 @@ interface SdkConfig
 /** 场景配置占位。服务地址、采集频率和业务参数由场景定义。 */
 interface SceneConfig
 
+/** 按场景提供敏感凭据。凭据不得进入普通配置或日志。 */
+fun interface CredentialProvider {
+    fun credentialFor(sceneId: String): String?
+}
+
 /** 硬件能力配置占位。图像尺寸、格式和相机参数以后在这里填。 */
 interface CapabilityConfig
 
