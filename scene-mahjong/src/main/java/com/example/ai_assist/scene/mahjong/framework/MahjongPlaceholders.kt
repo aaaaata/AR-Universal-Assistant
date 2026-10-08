@@ -1,21 +1,5 @@
 package com.example.ai_assist.scene.mahjong.framework
 
-import android.view.ViewGroup
-import com.example.ai_assist.sdk.framework.SceneContent
-import com.example.ai_assist.sdk.framework.ScenePayload
-import com.example.ai_assist.sdk.framework.SceneRenderer
-
-/** 麻将 HUD 使用的三字段结果。类型信息以后再填。 */
-data class MahjongScenePayload(
-    val userHand: List<String>,
-    val meldedTiles: List<String>,
-    val suggestedPlay: String
-) : ScenePayload {
-    companion object {
-        const val RENDERER_KEY = "mahjong.result.v1"
-    }
-}
-
 /** 云端麻将分析结果的场景边界，具体协议 DTO 通过实现该接口接入。 */
 interface MahjongCloudResult
 
@@ -39,17 +23,5 @@ interface MahjongCloudService {
 interface MahjongFieldMapper {
     fun map(cloudResult: MahjongCloudResult): MahjongScenePayload
     fun parseTile(raw: String): String
-}
-
-/** 麻将业务结果渲染器。 */
-class MahjongRenderer : SceneRenderer {
-    override val rendererKey: String = MahjongScenePayload.RENDERER_KEY
-
-    override fun render(container: ViewGroup, content: SceneContent) {
-        require(content.rendererKey == rendererKey) {
-            "Unsupported renderer key: ${content.rendererKey}"
-        }
-    }
-
-    override fun clear() = Unit
+    fun diagnosticMessage(code: String): String = code
 }

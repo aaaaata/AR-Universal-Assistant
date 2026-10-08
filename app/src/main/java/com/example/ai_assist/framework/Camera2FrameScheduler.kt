@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -201,7 +203,8 @@ class Camera2FrameScheduler(context: Context) : CameraScheduler {
                             Frame(
                                 file = file,
                                 imageRotationDegrees = 0,
-                                capturedAtMillis = System.currentTimeMillis()
+                                capturedAtMillis = System.currentTimeMillis(),
+                                medianLuma = runCatching { estimateMedianLuma(bytes) }.getOrNull()
                             )
                         )
                     } else {
@@ -260,6 +263,27 @@ class Camera2FrameScheduler(context: Context) : CameraScheduler {
         return File.createTempFile("mahjong-frame-", ".jpg", directory)
     }
 
+    private fun estimateMedianLuma(jpeg: ByteArray): Int? {
+        val options = BitmapFactory.Options().apply { inSampleSize = LUMA_DECODE_SAMPLE_SIZE }
+        val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, options) ?: return null
+        return try {
+            val samples = ArrayList<Int>()
+            for (y in 0 until bitmap.height step LUMA_PIXEL_STEP) {
+                for (x in 0 until bitmap.width step LUMA_PIXEL_STEP) {
+                    val pixel = bitmap.getPixel(x, y)
+                    samples += (
+                        77 * Color.red(pixel) +
+                            150 * Color.green(pixel) +
+                            29 * Color.blue(pixel)
+                        ) shr 8
+                }
+            }
+            samples.takeIf { it.isNotEmpty() }?.sorted()?.let { it[it.size / 2] }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     private fun <T> CancellableContinuation<T>.resumeExceptionIfActive(error: Throwable) {
         if (isActive) resumeWithException(error)
     }
@@ -268,5 +292,7 @@ class Camera2FrameScheduler(context: Context) : CameraScheduler {
         const val TAG = "MahjongFrameFlow"
         const val MAX_IMAGES = 2
         const val JPEG_ORIENTATION_DEGREES = 90
+        const val LUMA_DECODE_SAMPLE_SIZE = 16
+        const val LUMA_PIXEL_STEP = 2
     }
 }

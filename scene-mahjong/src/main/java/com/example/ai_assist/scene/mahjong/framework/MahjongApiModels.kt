@@ -38,8 +38,30 @@ data class MahjongSuggestion(
 )
 
 data class MahjongConfidence(
+    @SerializedName("region") val region: Double = 0.0,
+    @SerializedName("recognition") val recognition: Double = 0.0,
+    @SerializedName("structure") val structure: Double = 0.0,
     @SerializedName("suggestion") val suggestion: Double = 0.0,
     @SerializedName("reasons") val reasons: List<String> = emptyList()
+)
+
+data class MahjongImageInfo(
+    @SerializedName("width") val width: Int = 0,
+    @SerializedName("height") val height: Int = 0
+)
+
+data class MahjongBoundingBox(
+    @SerializedName("x1") val x1: Double = 0.0,
+    @SerializedName("y1") val y1: Double = 0.0,
+    @SerializedName("x2") val x2: Double = 0.0,
+    @SerializedName("y2") val y2: Double = 0.0
+)
+
+data class MahjongTileDetection(
+    @SerializedName("region_type") val regionType: String = "",
+    @SerializedName("tile_confidence") val tileConfidence: Double = 0.0,
+    @SerializedName("bbox_in_original_image")
+    val bboxInOriginalImage: MahjongBoundingBox? = null
 )
 
 /** 服务端单帧分析响应，也是 MahjongCloudResult 契约的协议实现。 */
@@ -49,7 +71,13 @@ data class MahjongAnalysisResponse(
     @SerializedName("diagnostic_code") val diagnosticCode: String? = null,
     @SerializedName("hand_tiles") val handTiles: List<String> = emptyList(),
     @SerializedName("meld_groups") val meldGroups: List<MahjongMeldGroup> = emptyList(),
+    @SerializedName("bonus_tiles") val bonusTiles: List<String> = emptyList(),
     @SerializedName("suggestion") val suggestion: MahjongSuggestion? = null,
     @SerializedName("confidence") val confidence: MahjongConfidence? = null,
-    @SerializedName("warnings") val warnings: List<String> = emptyList()
+    @SerializedName("warnings") val warnings: List<String> = emptyList(),
+    @SerializedName("image") val image: MahjongImageInfo? = null,
+    @SerializedName("tile_detections")
+    val tileDetections: List<MahjongTileDetection> = emptyList(),
+    @SerializedName("has_low_confidence_hand_tile_detection")
+    val hasLowConfidenceHandTileDetection: Boolean? = null
 ) : MahjongCloudResult

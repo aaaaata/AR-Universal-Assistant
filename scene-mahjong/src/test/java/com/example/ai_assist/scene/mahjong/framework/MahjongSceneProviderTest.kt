@@ -107,7 +107,7 @@ class MahjongSceneProviderTest {
 
         assertEquals(2, payload.userHand.size)
         assertEquals(3, payload.meldedTiles.size)
-        assertEquals(payload.userHand[1], payload.suggestedPlay)
+        assertEquals(payload.userHand[1], payload.suggestedDiscard)
     }
 
     private fun provider(service: FakeCloudService) = MahjongSceneProvider(

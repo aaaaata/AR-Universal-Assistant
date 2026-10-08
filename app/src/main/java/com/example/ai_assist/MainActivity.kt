@@ -48,7 +48,9 @@ import com.example.ai_assist.model.ConnectionConfig
 import com.example.ai_assist.model.ServiceMode
 import com.example.ai_assist.repository.ChatRepository
 import com.example.ai_assist.scene.mahjong.framework.MahjongSceneConfig
-import com.example.ai_assist.scene.mahjong.framework.MahjongScenePayload
+import com.example.ai_assist.scene.mahjong.framework.MahjongRenderer
+import com.example.ai_assist.scene.mahjong.framework.MahjongSceneProvider
+import com.example.ai_assist.scene.mahjong.framework.MahjongServiceMode
 import com.example.ai_assist.service.GameApiService
 import com.example.ai_assist.service.RayNeoDeviceManager
 import com.example.ai_assist.sdk.framework.CredentialProvider
@@ -128,6 +130,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private var isCloudServiceReady = false
     private lateinit var frameScheduler: Camera2FrameScheduler
     private lateinit var sceneCore: DefaultCvGameCore
+    private lateinit var mahjongSceneProvider: MahjongSceneProvider
+    private lateinit var mahjongRenderer: MahjongRenderer
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -228,6 +232,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun setupFrameworkRuntime() {
         frameScheduler = Camera2FrameScheduler(applicationContext)
+        mahjongSceneProvider = MahjongSceneProvider()
+        mahjongRenderer = mahjongSceneProvider.createRenderer() as MahjongRenderer
         sceneCore = DefaultCvGameCore(
             cameraScheduler = frameScheduler,
             resourceManager = AndroidResourceManager(frameScheduler),
@@ -238,7 +244,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 }
             }
         )
-        registerScenes(sceneCore)
+        registerScenes(sceneCore, mahjongSceneProvider)
     }
 
     private fun setupUI() {
@@ -306,6 +312,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 when (action) {
                     is TempleAction.Click -> handleTempleClick()
                     is TempleAction.DoubleClick -> handleDoubleClickBack()
+                    is TempleAction.TripleClick -> handleTripleClick()
                     is TempleAction.SlideForward -> toggleAudioRecording()
                     is TempleAction.SlideBackward -> handleSlideBackward()
                     is TempleAction.SlideUpwards -> {
@@ -356,6 +363,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 finish()
             }
         }
+    }
+
+    private fun handleTripleClick() {
+        if (currentMode != UiMode.STREAMING) return
+        stopStreaming()
+        showServiceSelectionMode()
     }
 
     private fun handleTempleClick() {
@@ -526,6 +539,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             tvConnectionSummary.visibility = View.GONE
             layoutPhotoReviewContainer.visibility = View.GONE
             layoutInstructionGaming.visibility = View.GONE
+            layoutMainContent.visibility = View.VISIBLE
             tvInstructionIdle.visibility = View.GONE
         }
         updateServiceFocusUi()
@@ -548,6 +562,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             tvConnectionSummary.visibility = View.VISIBLE
             layoutPhotoReviewContainer.visibility = View.GONE
             layoutInstructionGaming.visibility = View.GONE
+            layoutMainContent.visibility = View.VISIBLE
             tvInstructionIdle.visibility = View.VISIBLE
             tvInstructionIdle.text = "上下选择 / 单击确认"
             tvStatus.text = "设置"
@@ -575,6 +590,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             tvConnectionSummary.visibility = View.GONE
             layoutPhotoReviewContainer.visibility = View.GONE
             layoutInstructionGaming.visibility = View.GONE
+            layoutMainContent.visibility = View.VISIBLE
             tvInstructionIdle.visibility = View.GONE
             tvCloudEndpoint.text = AppConfig.CLOUD_SERVER_BASE_URL
             btnRetryCloudConnection.text = "重新连接"
@@ -637,12 +653,13 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutServiceSelectionContainer.visibility = View.GONE
             layoutConfigContainer.visibility = View.GONE
             layoutCloudConfigContainer.visibility = View.GONE
-            layoutInstructionGaming.visibility = View.GONE
+            layoutInstructionGaming.visibility = View.VISIBLE
+            layoutMainContent.visibility = View.GONE
             tvStreamGestureHint.visibility = View.GONE
             tvInstructionIdle.visibility = View.GONE
-            tvStatus.visibility = View.VISIBLE
+            tvStatus.visibility = View.GONE
             tvConnectionSummary.visibility = View.GONE
-            viewConnectionIndicator.visibility = View.VISIBLE
+            viewConnectionIndicator.visibility = View.GONE
             cardCameraPreview.visibility = View.GONE
             tvInstructionCameraPreview.visibility = View.GONE
             layoutPhotoReviewContainer.visibility = View.GONE
@@ -652,6 +669,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             } ?: "未配置连接"
             tvConnectionStatus.text = "已连接"
             tvStreamGestureHint.text = "录 | 设 | 退"
+            val serviceMode = if (activeConfig?.serviceMode == ServiceMode.LOCAL) {
+                MahjongServiceMode.LOCAL
+            } else {
+                MahjongServiceMode.CLOUD
+            }
+            mahjongRenderer.renderEmpty(layoutInstructionGaming, serviceMode)
         }
     }
 
@@ -662,6 +685,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         stopAudioRecording(silent = true)
         closeCamera()
         sceneCore.stopScene()
+        mahjongRenderer.clear()
         sceneEventsJob?.cancel()
         sceneEventsJob = null
         viewModel.endCurrentSession()
@@ -672,6 +696,11 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         val fps = connection.fps.coerceIn(1, AppConfig.MAX_CAPTURE_FPS)
         val sceneConfig = MahjongSceneConfig(
             serverBaseUrl = connection.serverUrl,
+            serviceMode = if (connection.serviceMode == ServiceMode.LOCAL) {
+                MahjongServiceMode.LOCAL
+            } else {
+                MahjongServiceMode.CLOUD
+            },
             captureIntervalMillis = 1_000L / fps
         )
         sceneEventsJob = lifecycleScope.launch {
@@ -698,7 +727,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         when (event) {
             is SdkEvent.StateChanged -> handleSdkState(event.state)
             is SdkEvent.ResultReceived -> {
-                val payload = event.result.content?.scenePayload as? MahjongScenePayload ?: return
+                val content = event.result.content ?: return
                 Log.i(
                     "MahjongFramework",
                     "event=result_received sequence_id=${event.result.sequenceId} " +
@@ -706,11 +735,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 )
                 isPrimaryConnected = true
                 mBindingPair.updateView {
-                    tvContentHand.text = formatMahjongText(payload.userHand.joinToString(" "))
-                    tvContentSuggested.text = formatMahjongText(payload.meldedTiles.joinToString(" "))
-                    tvContentWaiting.text = formatMahjongText(payload.suggestedPlay)
-                    tvStatus.text = event.result.summary.status
-                    tvStatus.setTextColor(getColor(R.color.neon_green))
+                    mahjongRenderer.render(layoutInstructionGaming, content)
                 }
                 refreshConnectionStatus()
             }

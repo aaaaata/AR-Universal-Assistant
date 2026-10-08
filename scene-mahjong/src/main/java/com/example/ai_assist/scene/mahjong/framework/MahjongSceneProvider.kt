@@ -38,10 +38,14 @@ class MahjongSceneProvider internal constructor(
         listOf(CapabilityType.CAMERA)
 
     private val activeJob = AtomicReference<Job?>(null)
+    private val renderer = MahjongRenderer()
+    private var resultStabilizer = MahjongResultStabilizer()
+    private var diagnosticStabilizer = MahjongDiagnosticStabilizer()
+    private var captureGuidance = MahjongCaptureGuidance()
 
     override fun createSceneConfig(): SceneConfig = MahjongSceneConfig()
 
-    override fun createRenderer(): SceneRenderer = MahjongRenderer()
+    override fun createRenderer(): SceneRenderer = renderer
 
     override fun start(sceneContext: SceneContext): Flow<SceneResult> = flow {
         val job = requireNotNull(currentCoroutineContext()[Job])
@@ -51,6 +55,10 @@ class MahjongSceneProvider internal constructor(
         try {
             val config = sceneContext.config as? MahjongSceneConfig
                 ?: failStartup(sceneContext, "MAHJONG_CONFIG_INVALID", "MahjongSceneConfig is required")
+            resultStabilizer = MahjongResultStabilizer()
+            diagnosticStabilizer = MahjongDiagnosticStabilizer()
+            captureGuidance = MahjongCaptureGuidance()
+            renderer.prepare(config.serviceMode)
             val credential = sceneContext.credential()?.takeIf(String::isNotBlank)
                 ?: failStartup(sceneContext, "MAHJONG_CREDENTIAL_MISSING", "Mahjong API key is required")
 
@@ -96,6 +104,7 @@ class MahjongSceneProvider internal constructor(
             ).collect { frame ->
                 sequenceId += 1
                 try {
+                    renderGuidance(captureGuidance.onFrameReady(frame))
                     val result = service.submitImage(
                         sessionId,
                         MahjongImageSubmission(
@@ -105,25 +114,34 @@ class MahjongSceneProvider internal constructor(
                         )
                     )
                         .getOrElse { throw it }
-                    val payload = fieldMapper.map(result)
                     val response = result as? MahjongAnalysisResponse
-                    emit(
-                        SceneResult(
-                            sceneId = sceneId,
-                            sessionId = sceneContext.sessionId,
-                            sequenceId = sequenceId,
-                            updatedAtMillis = System.currentTimeMillis(),
-                            summary = SceneSummary(
-                                title = payload.suggestedPlay.takeIf(String::isNotBlank)
-                                    ?.let { "建议：$it" } ?: "麻将分析完成",
-                                status = response?.status?.ifBlank { "complete" } ?: "complete",
-                                confidence = response?.confidence?.suggestion?.coerceIn(0.0, 1.0),
-                                warnings = response?.warnings.orEmpty() +
-                                    response?.confidence?.reasons.orEmpty()
-                            ),
-                            content = SceneContent(MahjongScenePayload.RENDERER_KEY, payload)
-                        )
+                        ?: throw IllegalArgumentException("Unsupported Mahjong cloud result")
+                    val payload = fieldMapper.map(response).copy(serviceMode = config.serviceMode)
+                    val sceneResult = SceneResult(
+                        sceneId = sceneId,
+                        sessionId = sceneContext.sessionId,
+                        sequenceId = sequenceId,
+                        updatedAtMillis = System.currentTimeMillis(),
+                        summary = SceneSummary(
+                            title = payload.suggestedDiscard
+                                ?.let { "建议打出：$it" } ?: "麻将分析完成",
+                            status = response.status.ifBlank { "unknown" },
+                            confidence = response.confidence?.suggestion?.coerceIn(0.0, 1.0),
+                            warnings = response.warnings + response.confidence?.reasons.orEmpty()
+                        ),
+                        content = SceneContent(MahjongScenePayload.RENDERER_KEY, payload)
                     )
+                    diagnosticStabilizer.evaluate(response.diagnosticCode)?.let { update ->
+                        renderer.renderDiagnosticWarning(
+                            update.code?.let(fieldMapper::diagnosticMessage)
+                        )
+                    }
+                    renderGuidance(captureGuidance.onResult(response))
+                    if (resultStabilizer.evaluate(response, sceneResult) ==
+                        MahjongResultStabilizer.Decision.PUBLISH
+                    ) {
+                        emit(sceneResult)
+                    }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
@@ -143,6 +161,8 @@ class MahjongSceneProvider internal constructor(
             }
         } finally {
             activeJob.compareAndSet(job, null)
+            renderer.renderDiagnosticWarning(null)
+            renderGuidance(captureGuidance.reset())
             cloudSessionId?.let { sessionId ->
                 cloudService?.let { service ->
                     withContext(NonCancellable) {
@@ -162,6 +182,14 @@ class MahjongSceneProvider internal constructor(
 
     override fun stop() {
         activeJob.get()?.cancel(CancellationException("Mahjong scene stopped"))
+    }
+
+    private fun renderGuidance(update: MahjongGuidanceUpdate?) {
+        when (update) {
+            is MahjongGuidanceUpdate.Show -> renderer.renderNotice(update.message)
+            MahjongGuidanceUpdate.Dismiss -> renderer.renderNotice(null)
+            null -> Unit
+        }
     }
 
     private suspend fun failStartup(

@@ -3,6 +3,8 @@ package com.example.ai_assist.scene.mahjong.framework
 import com.example.ai_assist.sdk.framework.CapabilityConfig
 import com.example.ai_assist.sdk.framework.SceneConfig
 
+enum class MahjongServiceMode { LOCAL, CLOUD }
+
 /** 麻将场景使用的相机参数。具体分辨率由相机能力实现选择。 */
 data class MahjongCameraConfig(
     val preferredWidth: Int = 1280,
@@ -19,6 +21,7 @@ data class MahjongCameraConfig(
 /** 单次麻将云端交换会话配置。API Key 必须由 SceneContext.credential() 提供。 */
 data class MahjongSceneConfig(
     val serverBaseUrl: String = DEFAULT_SERVER_BASE_URL,
+    val serviceMode: MahjongServiceMode = MahjongServiceMode.CLOUD,
     val ruleProfileId: String = DEFAULT_RULE_PROFILE_ID,
     val recordingMode: String = DEFAULT_RECORDING_MODE,
     val captureIntervalMillis: Long = DEFAULT_CAPTURE_INTERVAL_MILLIS,

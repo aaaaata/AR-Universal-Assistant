@@ -55,7 +55,8 @@ enum class InputAction {
 data class Frame(
     val file: File,
     val imageRotationDegrees: Int,
-    val capturedAtMillis: Long
+    val capturedAtMillis: Long,
+    val medianLuma: Int? = null
 )
 
 /** 一个场景会话占位。 */
