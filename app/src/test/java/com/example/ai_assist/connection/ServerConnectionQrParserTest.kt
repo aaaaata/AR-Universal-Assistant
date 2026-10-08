@@ -1,5 +1,6 @@
 package com.example.ai_assist.connection
 
+import com.example.ai_assist.model.ServiceMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -14,6 +15,7 @@ class ServerConnectionQrParserTest {
 
         assertEquals("mahjong", config.sceneId)
         assertEquals("http://192.168.1.25:8000/", config.serverUrl)
+        assertEquals(ServiceMode.LOCAL, config.serviceMode)
     }
 
     @Test

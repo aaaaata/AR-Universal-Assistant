@@ -3,6 +3,16 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+fun String.asBuildConfigString(): String =
+    "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
+val cloudServerBaseUrl = providers.gradleProperty("CLOUD_SERVER_BASE_URL")
+    .orElse(providers.gradleProperty("CLOUD_BASE_URL"))
+    .getOrElse("http://39.96.67.192:8552/")
+require(cloudServerBaseUrl.endsWith('/')) {
+    "CLOUD_SERVER_BASE_URL must end with '/': $cloudServerBaseUrl"
+}
+
 android {
     namespace = "com.example.ai_assist"
     compileSdk {
@@ -11,6 +21,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     defaultConfig {
@@ -19,6 +30,12 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField(
+            "String",
+            "CLOUD_SERVER_BASE_URL",
+            cloudServerBaseUrl.asBuildConfigString()
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

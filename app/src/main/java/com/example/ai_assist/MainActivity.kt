@@ -37,7 +37,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
+import com.example.ai_assist.connection.CloudServiceConnector
 import com.example.ai_assist.databinding.ActivityMainBinding
+import com.example.ai_assist.connection.HttpServiceReadinessProbe
+import com.example.ai_assist.connection.ServiceReadinessProbe
 import com.example.ai_assist.model.ConnectionConfig
 import com.example.ai_assist.repository.ChatRepository
 import com.example.ai_assist.service.GameApiService
@@ -72,7 +75,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
-    private enum class UiMode { CONFIG, STREAMING }
+    private enum class UiMode { SERVICE_SELECTION, CONFIG, CLOUD_CONFIG, STREAMING }
 
     private lateinit var viewModel: ChatViewModel
     private lateinit var cameraExecutor: ExecutorService
@@ -95,13 +98,21 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private var audioRecorder: RayNeoAudioRecorder? = null
     private var isRecordingAudio = false
-    private var currentMode = UiMode.CONFIG
+    private var currentMode = UiMode.SERVICE_SELECTION
     private var activeConfig: ConnectionConfig? = null
     private val streamClient = OkHttpClient()
+    private val readinessProbe: ServiceReadinessProbe by lazy {
+        HttpServiceReadinessProbe(streamClient)
+    }
+    private val cloudServiceConnector: CloudServiceConnector by lazy {
+        CloudServiceConnector(readinessProbe)
+    }
     private var suggestionSocket: WebSocket? = null
+    private var serviceFocusIndex = 0
     private var configFocusIndex = 0
     private var isPrimaryConnected = false
     private var isSuggestionStreamConnected = false
+    private var isCloudConnectionInFlight = false
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -146,7 +157,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
         activeConfig = configStore.load()
         configFocusIndex = if (activeConfig == null) 0 else 1
-        showConfigMode()
+        showServiceSelectionMode()
     }
 
     override fun onResume() {
@@ -211,6 +222,17 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             }
 
             tvConnectionStatus.setOnClickListener { toggleConfigMode() }
+            btnLocalConnection.setOnClickListener {
+                serviceFocusIndex = 0
+                updateServiceFocusUi()
+                showConfigMode()
+            }
+            btnCloudConnection.setOnClickListener {
+                serviceFocusIndex = 1
+                updateServiceFocusUi()
+                showCloudConfigMode()
+            }
+            btnRetryCloudConnection.setOnClickListener { connectCloudService() }
             btnScanConfig.setOnClickListener {
                 configFocusIndex = 0
                 updateConfigFocusUi()
@@ -250,23 +272,25 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                     is TempleAction.SlideForward -> toggleAudioRecording()
                     is TempleAction.SlideBackward -> handleSlideBackward()
                     is TempleAction.SlideUpwards -> {
-                        if (currentMode == UiMode.CONFIG) {
-                            moveConfigFocus(-1)
-                        } else {
-                            mBindingPair.updateView {
+                        when (currentMode) {
+                            UiMode.SERVICE_SELECTION -> moveServiceFocus(-1)
+                            UiMode.CONFIG -> moveConfigFocus(-1)
+                            UiMode.STREAMING -> mBindingPair.updateView {
                                 val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
                                 svContentWaiting.smoothScrollBy(0, scrollAmount)
                             }
+                            UiMode.CLOUD_CONFIG -> Unit
                         }
                     }
                     is TempleAction.SlideDownwards -> {
-                        if (currentMode == UiMode.CONFIG) {
-                            moveConfigFocus(1)
-                        } else {
-                            mBindingPair.updateView {
+                        when (currentMode) {
+                            UiMode.SERVICE_SELECTION -> moveServiceFocus(1)
+                            UiMode.CONFIG -> moveConfigFocus(1)
+                            UiMode.STREAMING -> mBindingPair.updateView {
                                 val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
                                 svContentWaiting.smoothScrollBy(0, -scrollAmount)
                             }
+                            UiMode.CLOUD_CONFIG -> Unit
                         }
                     }
                     else -> Unit
@@ -287,18 +311,48 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             }
             return
         }
-        if (currentMode == UiMode.CONFIG) {
-            finish()
-            return
+        when (currentMode) {
+            UiMode.SERVICE_SELECTION -> finish()
+            UiMode.CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
+            UiMode.STREAMING -> {
+                stopStreaming()
+                finish()
+            }
         }
-        stopStreaming()
-        finish()
     }
 
     private fun handleTempleClick() {
-        if (currentMode == UiMode.CONFIG) {
-            activateFocusedConfigAction()
-            return
+        when (currentMode) {
+            UiMode.SERVICE_SELECTION -> activateFocusedServiceAction()
+            UiMode.CONFIG -> activateFocusedConfigAction()
+            UiMode.CLOUD_CONFIG -> connectCloudService()
+            UiMode.STREAMING -> Unit
+        }
+    }
+
+    private fun moveServiceFocus(direction: Int) {
+        serviceFocusIndex = (serviceFocusIndex + direction + 2) % 2
+        updateServiceFocusUi()
+    }
+
+    private fun activateFocusedServiceAction() {
+        if (serviceFocusIndex == 0) showConfigMode() else showCloudConfigMode()
+    }
+
+    private fun updateServiceFocusUi() {
+        mBindingPair.updateView {
+            val focusedBackground = R.drawable.bg_config_option_focused
+            val idleBackground = R.drawable.bg_config_option_idle
+            btnLocalConnection.setBackgroundResource(
+                if (serviceFocusIndex == 0) focusedBackground else idleBackground
+            )
+            btnCloudConnection.setBackgroundResource(
+                if (serviceFocusIndex == 1) focusedBackground else idleBackground
+            )
+            btnLocalConnection.alpha = if (serviceFocusIndex == 0) 1f else 0.72f
+            btnCloudConnection.alpha = if (serviceFocusIndex == 1) 1f else 0.72f
+            btnLocalConnection.text = if (serviceFocusIndex == 0) "▶ 本地连接" else "本地连接"
+            btnCloudConnection.text = if (serviceFocusIndex == 1) "▶ 云端连接" else "云端连接"
         }
     }
 
@@ -309,10 +363,10 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     }
 
     private fun handleSlideBackward() {
-        if (currentMode == UiMode.CONFIG) {
-            showCustomToast("请选择连接方式")
-        } else {
-            showConfigMode()
+        when (currentMode) {
+            UiMode.SERVICE_SELECTION -> showCustomToast("请选择连接方式")
+            UiMode.CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
+            UiMode.STREAMING -> showConfigMode()
         }
     }
 
@@ -378,7 +432,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             tvConfigSummary.text = config.serverUrl
         }
         lifecycleScope.launch {
-            if (!isServerReady(config.serverUrl)) {
+            if (!readinessProbe.isReady(config.serverUrl)) {
                 showCustomToast("服务不可用，请确认服务端和局域网")
                 mBindingPair.updateView { tvStatus.text = "连接失败" }
                 return@launch
@@ -390,20 +444,6 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             mBindingPair.updateView { tvStatus.text = "服务已连接" }
             showCustomToast(if (persistOnSuccess) "连接成功，配置已保存" else "已连接保存的服务")
         }
-    }
-
-    private suspend fun isServerReady(baseUrl: String): Boolean = withContext(Dispatchers.IO) {
-        runCatching {
-            val request = Request.Builder()
-                .url(baseUrl + "health/ready")
-                .get()
-                .build()
-            streamClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@use false
-                val status = JSONObject(response.body?.string().orEmpty()).optString("status")
-                status.equals("ready", ignoreCase = true)
-            }
-        }.getOrDefault(false)
     }
 
     private fun applyConnectionConfig(config: ConnectionConfig, startStreaming: Boolean) {
@@ -429,12 +469,36 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         }
     }
 
-    private fun showConfigMode() {
-        currentMode = UiMode.CONFIG
+    private fun showServiceSelectionMode() {
+        currentMode = UiMode.SERVICE_SELECTION
         stopCaptureLoop()
         closeCamera()
         mBindingPair.updateView {
+            layoutServiceSelectionContainer.visibility = View.VISIBLE
+            layoutConfigContainer.visibility = View.GONE
+            layoutCloudConfigContainer.visibility = View.GONE
+            cardCameraPreview.visibility = View.GONE
+            tvInstructionCameraPreview.visibility = View.GONE
+            tvStreamGestureHint.visibility = View.GONE
+            viewConnectionIndicator.visibility = View.GONE
+            tvStatus.visibility = View.GONE
+            tvConnectionSummary.visibility = View.GONE
+            layoutPhotoReviewContainer.visibility = View.GONE
+            layoutInstructionGaming.visibility = View.GONE
+            tvInstructionIdle.visibility = View.GONE
+        }
+        updateServiceFocusUi()
+    }
+
+    private fun showConfigMode() {
+        currentMode = UiMode.CONFIG
+        activeConfig = configStore.load()
+        stopCaptureLoop()
+        closeCamera()
+        mBindingPair.updateView {
+            layoutServiceSelectionContainer.visibility = View.GONE
             layoutConfigContainer.visibility = View.VISIBLE
+            layoutCloudConfigContainer.visibility = View.GONE
             cardCameraPreview.visibility = View.GONE
             tvInstructionCameraPreview.visibility = View.GONE
             tvStreamGestureHint.visibility = View.GONE
@@ -451,6 +515,60 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         }
         updateConnectionSummary(activeConfig)
         updateConfigFocusUi()
+    }
+
+    private fun showCloudConfigMode() {
+        currentMode = UiMode.CLOUD_CONFIG
+        stopCaptureLoop()
+        closeCamera()
+        mBindingPair.updateView {
+            layoutServiceSelectionContainer.visibility = View.GONE
+            layoutConfigContainer.visibility = View.GONE
+            layoutCloudConfigContainer.visibility = View.VISIBLE
+            cardCameraPreview.visibility = View.GONE
+            tvInstructionCameraPreview.visibility = View.GONE
+            tvStreamGestureHint.visibility = View.GONE
+            viewConnectionIndicator.visibility = View.GONE
+            tvStatus.visibility = View.GONE
+            tvConnectionSummary.visibility = View.GONE
+            layoutPhotoReviewContainer.visibility = View.GONE
+            layoutInstructionGaming.visibility = View.GONE
+            tvInstructionIdle.visibility = View.GONE
+            tvCloudEndpoint.text = AppConfig.CLOUD_SERVER_BASE_URL
+        }
+        connectCloudService()
+    }
+
+    private fun connectCloudService() {
+        if (currentMode != UiMode.CLOUD_CONFIG || isCloudConnectionInFlight) return
+        isCloudConnectionInFlight = true
+        mBindingPair.updateView {
+            tvCloudConnectionStatus.text = "正在连接云端服务..."
+            tvCloudConnectionStatus.setTextColor(getColor(R.color.bright_blue))
+            btnRetryCloudConnection.isEnabled = false
+        }
+        lifecycleScope.launch {
+            val result = cloudServiceConnector.connect()
+            isCloudConnectionInFlight = false
+            if (currentMode != UiMode.CLOUD_CONFIG) return@launch
+            result
+                .onSuccess { config ->
+                    activeConfig = config
+                    mBindingPair.updateView {
+                        tvCloudConnectionStatus.text = "云端服务连接成功"
+                        tvCloudConnectionStatus.setTextColor(getColor(R.color.neon_green))
+                        tvCloudEndpoint.text = config.serverUrl
+                        btnRetryCloudConnection.isEnabled = true
+                    }
+                }
+                .onFailure {
+                    mBindingPair.updateView {
+                        tvCloudConnectionStatus.text = "云端服务连接失败"
+                        tvCloudConnectionStatus.setTextColor(getColor(android.R.color.holo_red_light))
+                        btnRetryCloudConnection.isEnabled = true
+                    }
+                }
+        }
     }
 
     private fun startStreaming() {
@@ -475,7 +593,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private fun startStreamingUi() {
         hasStartedCamera = true
         mBindingPair.updateView {
+            layoutServiceSelectionContainer.visibility = View.GONE
             layoutConfigContainer.visibility = View.GONE
+            layoutCloudConfigContainer.visibility = View.GONE
             layoutInstructionGaming.visibility = View.GONE
             tvStreamGestureHint.visibility = View.GONE
             tvInstructionIdle.visibility = View.GONE

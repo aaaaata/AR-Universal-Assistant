@@ -1,6 +1,7 @@
 package com.example.ai_assist.connection
 
 import com.example.ai_assist.model.ConnectionConfig
+import com.example.ai_assist.model.ServiceMode
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -28,6 +29,7 @@ object ServerConnectionQrParser {
             version = VERSION.toInt(),
             serverUrl = normalizeBaseUrl(baseUrl),
             sceneId = sceneId,
+            serviceMode = ServiceMode.LOCAL,
             label = "本地麻将服务"
         )
     }
