@@ -13,7 +13,7 @@ enum class ServiceMode(val wireValue: String) {
 data class ConnectionConfig(
     val version: Int = 1,
     val serverUrl: String,
-    val sceneId: String = "mahjong",
+    val sceneId: String,
     val serviceMode: ServiceMode = ServiceMode.LOCAL,
     val streamUrl: String? = null,
     val fps: Int = 1,

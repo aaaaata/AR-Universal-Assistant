@@ -7,6 +7,7 @@ import com.example.ai_assist.sdk.framework.CapabilityType
 import com.example.ai_assist.sdk.framework.Frame
 import com.example.ai_assist.sdk.framework.InputAction
 import com.example.ai_assist.sdk.framework.SceneConfig
+import com.example.ai_assist.sdk.framework.SceneConnection
 import com.example.ai_assist.sdk.framework.SceneContext
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
@@ -24,6 +25,21 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MahjongSceneProviderTest {
+    @Test
+    fun mapsGenericConnectionIntoMahjongSceneConfig() {
+        val config = MahjongSceneProvider().createSceneConfig(
+            SceneConnection(
+                serverBaseUrl = "http://192.168.1.2:8000/",
+                serviceModeId = "local",
+                captureIntervalMillis = 500L
+            )
+        ) as MahjongSceneConfig
+
+        assertEquals("http://192.168.1.2:8000/", config.serverBaseUrl)
+        assertEquals(MahjongServiceMode.LOCAL, config.serviceMode)
+        assertEquals(500L, config.captureIntervalMillis)
+    }
+
     @Test
     fun exchangesCameraFrameThroughFrameworkContractsAndEndsSession() = runBlocking {
         val frameFile = createFrameFile(byteArrayOf(1, 2, 3))

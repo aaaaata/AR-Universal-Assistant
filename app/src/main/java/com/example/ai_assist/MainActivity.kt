@@ -29,32 +29,35 @@ import android.text.style.TypefaceSpan
 import android.util.Log
 import android.util.Range
 import android.util.Size
+import android.view.LayoutInflater
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import com.example.ai_assist.connection.CloudServiceConnector
 import com.example.ai_assist.databinding.ActivityMainBinding
+import com.example.ai_assist.databinding.ViewSceneMenuItemBinding
 import com.example.ai_assist.connection.HttpServiceReadinessProbe
 import com.example.ai_assist.connection.ServiceReadinessProbe
 import com.example.ai_assist.framework.AndroidResourceManager
 import com.example.ai_assist.framework.Camera2FrameScheduler
-import com.example.ai_assist.framework.registerScenes
+import com.example.ai_assist.framework.discoverAndRegisterScenes
 import com.example.ai_assist.model.ConnectionConfig
 import com.example.ai_assist.model.ServiceMode
 import com.example.ai_assist.repository.ChatRepository
-import com.example.ai_assist.scene.mahjong.framework.MahjongSceneConfig
-import com.example.ai_assist.scene.mahjong.framework.MahjongRenderer
-import com.example.ai_assist.scene.mahjong.framework.MahjongSceneProvider
-import com.example.ai_assist.scene.mahjong.framework.MahjongServiceMode
 import com.example.ai_assist.service.GameApiService
 import com.example.ai_assist.service.RayNeoDeviceManager
 import com.example.ai_assist.sdk.framework.CredentialProvider
+import com.example.ai_assist.sdk.framework.ConnectedSceneProvider
 import com.example.ai_assist.sdk.framework.DefaultCvGameCore
+import com.example.ai_assist.sdk.framework.SceneConnection
+import com.example.ai_assist.sdk.framework.SceneRegistration
+import com.example.ai_assist.sdk.framework.SceneRenderer
 import com.example.ai_assist.sdk.framework.SdkEvent
 import com.example.ai_assist.sdk.framework.SdkState
 import com.example.ai_assist.storage.ConnectionConfigStore
@@ -88,7 +91,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
-    private enum class UiMode { SERVICE_SELECTION, CONFIG, CLOUD_CONFIG, STREAMING }
+    private enum class UiMode { SCENE_MENU, SERVICE_SELECTION, LOCAL_CONFIG, CLOUD_CONFIG, STREAMING }
 
     private lateinit var viewModel: ChatViewModel
     private lateinit var cameraExecutor: ExecutorService
@@ -112,7 +115,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private var audioRecorder: RayNeoAudioRecorder? = null
     private var isRecordingAudio = false
-    private var currentMode = UiMode.SERVICE_SELECTION
+    private var currentMode = UiMode.SCENE_MENU
     private var activeConfig: ConnectionConfig? = null
     private val streamClient = OkHttpClient()
     private val readinessProbe: ServiceReadinessProbe by lazy {
@@ -130,8 +133,10 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private var isCloudServiceReady = false
     private lateinit var frameScheduler: Camera2FrameScheduler
     private lateinit var sceneCore: DefaultCvGameCore
-    private lateinit var mahjongSceneProvider: MahjongSceneProvider
-    private lateinit var mahjongRenderer: MahjongRenderer
+    private var sceneRegistrations: List<SceneRegistration> = emptyList()
+    private var sceneRenderersByKey: Map<String, SceneRenderer> = emptyMap()
+    private var activeSceneId: String? = null
+    private var selectedSceneIndex = 0
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -175,9 +180,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         observeViewModel()
         checkPermissions()
 
-        activeConfig = configStore.load()
-        configFocusIndex = if (activeConfig == null) 0 else 1
-        showServiceSelectionMode()
+        showSceneMenu()
     }
 
     override fun onResume() {
@@ -232,8 +235,6 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun setupFrameworkRuntime() {
         frameScheduler = Camera2FrameScheduler(applicationContext)
-        mahjongSceneProvider = MahjongSceneProvider()
-        mahjongRenderer = mahjongSceneProvider.createRenderer() as MahjongRenderer
         sceneCore = DefaultCvGameCore(
             cameraScheduler = frameScheduler,
             resourceManager = AndroidResourceManager(frameScheduler),
@@ -244,7 +245,11 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 }
             }
         )
-        registerScenes(sceneCore, mahjongSceneProvider)
+        sceneRegistrations = discoverAndRegisterScenes(applicationContext, sceneCore)
+        require(sceneRegistrations.isNotEmpty()) { "No scene modules were discovered" }
+        sceneRenderersByKey = sceneRegistrations
+            .map { it.provider.createRenderer() }
+            .associateBy { it.rendererKey }
     }
 
     private fun setupUI() {
@@ -291,6 +296,73 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 updateConfigFocusUi()
                 clearSavedConnection()
             }
+            serviceSelectionLocalButton.setOnClickListener {
+                serviceFocusIndex = 0
+                updateServiceFocusUi()
+                showConfigMode()
+            }
+            serviceSelectionCloudButton.setOnClickListener {
+                serviceFocusIndex = 1
+                updateServiceFocusUi()
+                showCloudConfigMode()
+            }
+            localConfigScanButton.setOnClickListener {
+                configFocusIndex = 0
+                updateConfigFocusUi()
+                launchQrScanner()
+            }
+            localConfigSavedButton.setOnClickListener {
+                configFocusIndex = 1
+                updateConfigFocusUi()
+                useSavedConnection()
+            }
+            localConfigClearButton.setOnClickListener {
+                configFocusIndex = 2
+                updateConfigFocusUi()
+                clearSavedConnection()
+            }
+        }
+        renderSceneMenu()
+    }
+
+    private fun renderSceneMenu() {
+        mBindingPair.updateView {
+            menuSceneItems.removeAllViews()
+            val itemCount = sceneRegistrations.size + 1
+            repeat(itemCount) { index ->
+                val itemBinding = ViewSceneMenuItemBinding.inflate(
+                    LayoutInflater.from(this@MainActivity),
+                    menuSceneItems,
+                    false
+                )
+                val registration = sceneRegistrations.getOrNull(index)
+                val title = registration?.presentation?.menuTitle
+                    ?: getString(R.string.scene_add_name)
+                val icon = registration?.presentation?.menuIconRes ?: R.drawable.ic_add_scene
+                val selected = index == selectedSceneIndex
+                itemBinding.root.isSelected = selected
+                itemBinding.sceneMenuIconFrame.isSelected = selected
+                itemBinding.sceneMenuIcon.setImageResource(icon)
+                itemBinding.sceneMenuIcon.contentDescription = title
+                itemBinding.sceneMenuIcon.scaleX = if (selected) 1.18f else 1f
+                itemBinding.sceneMenuIcon.scaleY = if (selected) 1.18f else 1f
+                itemBinding.sceneMenuIcon.alpha = if (selected) 1f else 0.82f
+                itemBinding.sceneMenuTitle.text = title
+                itemBinding.sceneMenuTitle.visibility =
+                    if (selected) View.VISIBLE else View.INVISIBLE
+                itemBinding.root.setOnClickListener {
+                    selectedSceneIndex = index
+                    renderSceneMenu()
+                    activateSelectedSceneMenuItem()
+                }
+                menuSceneItems.addView(itemBinding.root)
+            }
+            menuSceneScroll.post {
+                val selected = menuSceneItems.getChildAt(selectedSceneIndex)
+                    ?: return@post
+                val targetX = selected.left - (menuSceneScroll.width - selected.width) / 2
+                menuSceneScroll.smoothScrollTo(targetX.coerceAtLeast(0), 0)
+            }
         }
     }
 
@@ -309,31 +381,39 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
         lifecycleScope.launch {
             templeActionViewModel.state.collect { action ->
+                if (currentMode == UiMode.STREAMING) {
+                    if (action is TempleAction.TripleClick) handleTripleClick()
+                    return@collect
+                }
                 when (action) {
                     is TempleAction.Click -> handleTempleClick()
                     is TempleAction.DoubleClick -> handleDoubleClickBack()
                     is TempleAction.TripleClick -> handleTripleClick()
-                    is TempleAction.SlideForward -> toggleAudioRecording()
-                    is TempleAction.SlideBackward -> handleSlideBackward()
+                    is TempleAction.SlideForward -> when (currentMode) {
+                        UiMode.SCENE_MENU -> moveSceneFocus(1)
+                        UiMode.SERVICE_SELECTION -> moveServiceFocus(1)
+                        UiMode.LOCAL_CONFIG -> moveConfigFocus(1)
+                        UiMode.CLOUD_CONFIG, UiMode.STREAMING -> Unit
+                    }
+                    is TempleAction.SlideBackward -> when (currentMode) {
+                        UiMode.SCENE_MENU -> moveSceneFocus(-1)
+                        UiMode.SERVICE_SELECTION -> moveServiceFocus(-1)
+                        UiMode.LOCAL_CONFIG -> moveConfigFocus(-1)
+                        UiMode.CLOUD_CONFIG, UiMode.STREAMING -> Unit
+                    }
                     is TempleAction.SlideUpwards -> {
                         when (currentMode) {
-                            UiMode.SERVICE_SELECTION -> moveServiceFocus(-1)
-                            UiMode.CONFIG -> moveConfigFocus(-1)
-                            UiMode.STREAMING -> mBindingPair.updateView {
-                                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
-                                svContentWaiting.smoothScrollBy(0, scrollAmount)
-                            }
+                            UiMode.SCENE_MENU -> Unit
+                            UiMode.SERVICE_SELECTION, UiMode.LOCAL_CONFIG -> Unit
+                            UiMode.STREAMING -> Unit
                             UiMode.CLOUD_CONFIG -> Unit
                         }
                     }
                     is TempleAction.SlideDownwards -> {
                         when (currentMode) {
-                            UiMode.SERVICE_SELECTION -> moveServiceFocus(1)
-                            UiMode.CONFIG -> moveConfigFocus(1)
-                            UiMode.STREAMING -> mBindingPair.updateView {
-                                val scrollAmount = (tvContentWaiting.textSize * 3).toInt()
-                                svContentWaiting.smoothScrollBy(0, -scrollAmount)
-                            }
+                            UiMode.SCENE_MENU -> Unit
+                            UiMode.SERVICE_SELECTION, UiMode.LOCAL_CONFIG -> Unit
+                            UiMode.STREAMING -> Unit
                             UiMode.CLOUD_CONFIG -> Unit
                         }
                     }
@@ -356,8 +436,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             return
         }
         when (currentMode) {
-            UiMode.SERVICE_SELECTION -> finish()
-            UiMode.CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
+            UiMode.SCENE_MENU -> finish()
+            UiMode.SERVICE_SELECTION -> showSceneMenu()
+            UiMode.LOCAL_CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
             UiMode.STREAMING -> {
                 stopStreaming()
                 finish()
@@ -368,16 +449,39 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private fun handleTripleClick() {
         if (currentMode != UiMode.STREAMING) return
         stopStreaming()
-        showServiceSelectionMode()
+        showSceneMenu()
     }
 
     private fun handleTempleClick() {
         when (currentMode) {
+            UiMode.SCENE_MENU -> activateSelectedSceneMenuItem()
             UiMode.SERVICE_SELECTION -> activateFocusedServiceAction()
-            UiMode.CONFIG -> activateFocusedConfigAction()
+            UiMode.LOCAL_CONFIG -> activateFocusedConfigAction()
             UiMode.CLOUD_CONFIG -> connectCloudService()
             UiMode.STREAMING -> Unit
         }
+    }
+
+    private fun moveSceneFocus(direction: Int) {
+        val itemCount = sceneRegistrations.size + 1
+        selectedSceneIndex = (selectedSceneIndex + direction + itemCount) % itemCount
+        renderSceneMenu()
+    }
+
+    private fun activateSelectedSceneMenuItem() {
+        val registration = sceneRegistrations.getOrNull(selectedSceneIndex)
+        if (registration == null) {
+            Toast.makeText(
+                this,
+                getString(R.string.scene_catalog_unavailable),
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        activeSceneId = registration.provider.sceneId
+        activeConfig = configStore.load()?.takeIf(::isConnectionForActiveScene)
+        configFocusIndex = if (activeConfig == null) 0 else 1
+        showServiceSelectionMode()
     }
 
     private fun moveServiceFocus(direction: Int) {
@@ -391,18 +495,13 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun updateServiceFocusUi() {
         mBindingPair.updateView {
-            val focusedBackground = R.drawable.bg_config_option_focused
-            val idleBackground = R.drawable.bg_config_option_idle
-            btnLocalConnection.setBackgroundResource(
-                if (serviceFocusIndex == 0) focusedBackground else idleBackground
-            )
-            btnCloudConnection.setBackgroundResource(
-                if (serviceFocusIndex == 1) focusedBackground else idleBackground
-            )
-            btnLocalConnection.alpha = if (serviceFocusIndex == 0) 1f else 0.72f
-            btnCloudConnection.alpha = if (serviceFocusIndex == 1) 1f else 0.72f
-            btnLocalConnection.text = if (serviceFocusIndex == 0) "▶ 本地连接" else "本地连接"
-            btnCloudConnection.text = if (serviceFocusIndex == 1) "▶ 云端连接" else "云端连接"
+            serviceSelectionLocalButton.isActivated = serviceFocusIndex == 0
+            serviceSelectionCloudButton.isActivated = serviceFocusIndex == 1
+            if (serviceFocusIndex == 0) {
+                serviceSelectionLocalButton.requestFocus()
+            } else {
+                serviceSelectionCloudButton.requestFocus()
+            }
         }
     }
 
@@ -414,8 +513,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun handleSlideBackward() {
         when (currentMode) {
+            UiMode.SCENE_MENU -> Unit
             UiMode.SERVICE_SELECTION -> showCustomToast("请选择连接方式")
-            UiMode.CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
+            UiMode.LOCAL_CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
             UiMode.STREAMING -> {
                 stopStreaming()
                 showConfigMode()
@@ -433,31 +533,19 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun updateConfigFocusUi() {
         mBindingPair.updateView {
-            val focusedBackground = R.drawable.bg_config_option_focused
-            val idleBackground = R.drawable.bg_config_option_idle
-
-            btnScanConfig.setBackgroundResource(if (configFocusIndex == 0) focusedBackground else idleBackground)
-            btnUseSavedConfig.setBackgroundResource(if (configFocusIndex == 1) focusedBackground else idleBackground)
-            btnClearConfig.setBackgroundResource(if (configFocusIndex == 2) focusedBackground else idleBackground)
-
-            btnScanConfig.alpha = if (configFocusIndex == 0) 1f else 0.72f
-            btnUseSavedConfig.alpha = if (configFocusIndex == 1) 1f else 0.72f
-            btnClearConfig.alpha = if (configFocusIndex == 2) 1f else 0.72f
-
-            btnScanConfig.text = if (configFocusIndex == 0) "▶ 1. 扫码连接" else "1. 扫码连接"
-            btnUseSavedConfig.text = if (configFocusIndex == 1) "▶ 2. 继续当前配置" else "2. 继续当前配置"
-            btnClearConfig.text = if (configFocusIndex == 2) "▶ 3. 清除配置" else "3. 清除配置"
-
-            tvConfigGestureHint.text = when (configFocusIndex) {
-                0 -> "当前焦点：扫码连接。上滑下滑切换，单击确认。"
-                1 -> "当前焦点：继续当前配置。上滑下滑切换，单击确认。"
-                else -> "当前焦点：清除配置。上滑下滑切换，单击确认。"
+            localConfigScanButton.isActivated = configFocusIndex == 0
+            localConfigSavedButton.isActivated = configFocusIndex == 1
+            localConfigClearButton.isActivated = configFocusIndex == 2
+            when (configFocusIndex) {
+                0 -> localConfigScanButton.requestFocus()
+                1 -> localConfigSavedButton.requestFocus()
+                else -> localConfigClearButton.requestFocus()
             }
         }
     }
 
     private fun useSavedConnection() {
-        val savedConfig = configStore.load()
+        val savedConfig = configStore.load()?.takeIf(::isConnectionForActiveScene)
         if (savedConfig == null) {
             configFocusIndex = 0
             updateConfigFocusUi()
@@ -480,23 +568,48 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     }
 
     private fun validateAndApplyConnection(config: ConnectionConfig, persistOnSuccess: Boolean) {
+        if (!isConnectionForActiveScene(config)) {
+            showCustomToast("连接配置与当前场景不匹配")
+            return
+        }
+        val normalizedConfig = config.copy(sceneId = requireNotNull(activeSceneId))
         mBindingPair.updateView {
             tvStatus.text = "正在连接服务"
-            tvConfigSummary.text = config.serverUrl
+            tvConfigSummary.text = normalizedConfig.serverUrl
         }
         lifecycleScope.launch {
-            if (!readinessProbe.isReady(config.serverUrl)) {
+            if (!readinessProbe.isReady(normalizedConfig.serverUrl)) {
                 showCustomToast("服务不可用，请确认服务端和局域网")
                 mBindingPair.updateView { tvStatus.text = "连接失败" }
                 return@launch
             }
             if (persistOnSuccess) {
-                configStore.save(config)
+                configStore.save(normalizedConfig)
             }
-            applyConnectionConfig(config, startStreaming = !persistOnSuccess)
+            applyConnectionConfig(normalizedConfig, startStreaming = !persistOnSuccess)
             mBindingPair.updateView { tvStatus.text = "服务已连接" }
             showCustomToast(if (persistOnSuccess) "连接成功，配置已保存" else "已连接保存的服务")
         }
+    }
+
+    private fun isConnectionForActiveScene(config: ConnectionConfig): Boolean {
+        val provider = sceneRegistrations
+            .firstOrNull { it.provider.sceneId == activeSceneId }
+            ?.provider as? ConnectedSceneProvider ?: return false
+        return config.sceneId in provider.supportedConnectionSceneIds
+    }
+
+    private fun showSceneMenu() {
+        currentMode = UiMode.SCENE_MENU
+        stopCaptureLoop()
+        closeCamera()
+        mBindingPair.updateView {
+            appContentRoot.visibility = View.GONE
+            layoutSceneMenuContainer.visibility = View.VISIBLE
+            serviceSelectionPage.visibility = View.GONE
+            localConfigPage.visibility = View.GONE
+        }
+        renderSceneMenu()
     }
 
     private fun applyConnectionConfig(config: ConnectionConfig, startStreaming: Boolean) {
@@ -528,48 +641,25 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         stopCaptureLoop()
         closeCamera()
         mBindingPair.updateView {
-            layoutServiceSelectionContainer.visibility = View.VISIBLE
-            layoutConfigContainer.visibility = View.GONE
-            layoutCloudConfigContainer.visibility = View.GONE
-            cardCameraPreview.visibility = View.GONE
-            tvInstructionCameraPreview.visibility = View.GONE
-            tvStreamGestureHint.visibility = View.GONE
-            viewConnectionIndicator.visibility = View.GONE
-            tvStatus.visibility = View.GONE
-            tvConnectionSummary.visibility = View.GONE
-            layoutPhotoReviewContainer.visibility = View.GONE
-            layoutInstructionGaming.visibility = View.GONE
-            layoutMainContent.visibility = View.VISIBLE
-            tvInstructionIdle.visibility = View.GONE
+            appContentRoot.visibility = View.GONE
+            layoutSceneMenuContainer.visibility = View.GONE
+            serviceSelectionPage.visibility = View.VISIBLE
+            localConfigPage.visibility = View.GONE
         }
         updateServiceFocusUi()
     }
 
     private fun showConfigMode() {
-        currentMode = UiMode.CONFIG
-        activeConfig = configStore.load()
+        currentMode = UiMode.LOCAL_CONFIG
+        activeConfig = configStore.load()?.takeIf(::isConnectionForActiveScene)
         stopCaptureLoop()
         closeCamera()
         mBindingPair.updateView {
-            layoutServiceSelectionContainer.visibility = View.GONE
-            layoutConfigContainer.visibility = View.VISIBLE
-            layoutCloudConfigContainer.visibility = View.GONE
-            cardCameraPreview.visibility = View.GONE
-            tvInstructionCameraPreview.visibility = View.GONE
-            tvStreamGestureHint.visibility = View.GONE
-            viewConnectionIndicator.visibility = View.GONE
-            tvStatus.visibility = View.VISIBLE
-            tvConnectionSummary.visibility = View.VISIBLE
-            layoutPhotoReviewContainer.visibility = View.GONE
-            layoutInstructionGaming.visibility = View.GONE
-            layoutMainContent.visibility = View.VISIBLE
-            tvInstructionIdle.visibility = View.VISIBLE
-            tvInstructionIdle.text = "上下选择 / 单击确认"
-            tvStatus.text = "设置"
-            tvConnectionSummary.text = buildConfigSummary(activeConfig)
-            tvConfigDetails.text = buildConfigDetails(activeConfig)
+            appContentRoot.visibility = View.GONE
+            layoutSceneMenuContainer.visibility = View.GONE
+            serviceSelectionPage.visibility = View.GONE
+            localConfigPage.visibility = View.VISIBLE
         }
-        updateConnectionSummary(activeConfig)
         updateConfigFocusUi()
     }
 
@@ -579,6 +669,10 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         stopCaptureLoop()
         closeCamera()
         mBindingPair.updateView {
+            appContentRoot.visibility = View.VISIBLE
+            layoutSceneMenuContainer.visibility = View.GONE
+            serviceSelectionPage.visibility = View.GONE
+            localConfigPage.visibility = View.GONE
             layoutServiceSelectionContainer.visibility = View.GONE
             layoutConfigContainer.visibility = View.GONE
             layoutCloudConfigContainer.visibility = View.VISIBLE
@@ -611,7 +705,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             btnRetryCloudConnection.isEnabled = false
         }
         lifecycleScope.launch {
-            val result = cloudServiceConnector.connect()
+            val sceneId = activeSceneId ?: return@launch
+            val result = cloudServiceConnector.connect(sceneId)
             isCloudConnectionInFlight = false
             if (currentMode != UiMode.CLOUD_CONFIG) return@launch
             result
@@ -623,7 +718,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                         tvCloudConnectionStatus.setTextColor(getColor(R.color.neon_green))
                         tvCloudEndpoint.text = config.serverUrl
                         btnRetryCloudConnection.isEnabled = true
-                        btnRetryCloudConnection.text = "启动麻将场景"
+                        btnRetryCloudConnection.text = "启动场景"
                     }
                 }
                 .onFailure {
@@ -650,6 +745,10 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private fun startStreamingUi() {
         hasStartedCamera = true
         mBindingPair.updateView {
+            appContentRoot.visibility = View.VISIBLE
+            layoutSceneMenuContainer.visibility = View.GONE
+            serviceSelectionPage.visibility = View.GONE
+            localConfigPage.visibility = View.GONE
             layoutServiceSelectionContainer.visibility = View.GONE
             layoutConfigContainer.visibility = View.GONE
             layoutCloudConfigContainer.visibility = View.GONE
@@ -663,29 +762,24 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             cardCameraPreview.visibility = View.GONE
             tvInstructionCameraPreview.visibility = View.GONE
             layoutPhotoReviewContainer.visibility = View.GONE
-            tvStatus.text = "正在启动麻将场景"
+            tvStatus.text = "正在启动${activeSceneTitle()}"
             tvConnectionSummary.text = activeConfig?.let {
                 "${it.label ?: "已连"}  ${it.fps} fps"
             } ?: "未配置连接"
             tvConnectionStatus.text = "已连接"
             tvStreamGestureHint.text = "录 | 设 | 退"
-            val serviceMode = if (activeConfig?.serviceMode == ServiceMode.LOCAL) {
-                MahjongServiceMode.LOCAL
-            } else {
-                MahjongServiceMode.CLOUD
-            }
-            mahjongRenderer.renderEmpty(layoutInstructionGaming, serviceMode)
+            layoutInstructionGaming.removeAllViews()
         }
     }
 
     private fun stopStreaming() {
-        currentMode = UiMode.CONFIG
+        currentMode = UiMode.LOCAL_CONFIG
         stopCaptureLoop()
         disconnectSuggestionStream()
         stopAudioRecording(silent = true)
         closeCamera()
         sceneCore.stopScene()
-        mahjongRenderer.clear()
+        sceneRenderersByKey.values.forEach { it.clear() }
         sceneEventsJob?.cancel()
         sceneEventsJob = null
         viewModel.endCurrentSession()
@@ -693,15 +787,21 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
     private fun startFrameworkScene(connection: ConnectionConfig) {
         sceneEventsJob?.cancel()
+        val sceneId = activeSceneId ?: return
+        val provider = sceneRegistrations
+            .firstOrNull { it.provider.sceneId == sceneId }
+            ?.provider as? ConnectedSceneProvider
+        if (provider == null) {
+            showCustomToast("当前场景不支持连接配置")
+            return
+        }
         val fps = connection.fps.coerceIn(1, AppConfig.MAX_CAPTURE_FPS)
-        val sceneConfig = MahjongSceneConfig(
-            serverBaseUrl = connection.serverUrl,
-            serviceMode = if (connection.serviceMode == ServiceMode.LOCAL) {
-                MahjongServiceMode.LOCAL
-            } else {
-                MahjongServiceMode.CLOUD
-            },
-            captureIntervalMillis = 1_000L / fps
+        val sceneConfig = provider.createSceneConfig(
+            SceneConnection(
+                serverBaseUrl = connection.serverUrl,
+                serviceModeId = connection.serviceMode.wireValue,
+                captureIntervalMillis = 1_000L / fps
+            )
         )
         sceneEventsJob = lifecycleScope.launch {
             runCatching {
@@ -711,12 +811,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                 if (sceneCore.getCurrentState() == SdkState.ERROR) {
                     sceneCore.onAppForeground()
                 }
-                sceneCore.startScene(MAHJONG_SCENE_ID, sceneConfig).collect(::handleSdkEvent)
+                sceneCore.startScene(sceneId, sceneConfig).collect(::handleSdkEvent)
             }.onFailure { error ->
-                Log.e("MahjongFramework", "Unable to start Mahjong scene", error)
-                showCustomToast("麻将场景启动失败: ${error.message}")
+                Log.e("SceneFramework", "Unable to start scene $sceneId", error)
+                showCustomToast("${activeSceneTitle()}启动失败: ${error.message}")
                 mBindingPair.updateView {
-                    tvStatus.text = "麻将场景启动失败"
+                    tvStatus.text = "${activeSceneTitle()}启动失败"
                     tvStatus.setTextColor(getColor(android.R.color.holo_red_light))
                 }
             }
@@ -729,48 +829,49 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             is SdkEvent.ResultReceived -> {
                 val content = event.result.content ?: return
                 Log.i(
-                    "MahjongFramework",
+                    "SceneFramework",
                     "event=result_received sequence_id=${event.result.sequenceId} " +
                         "status=${event.result.summary.status}"
                 )
                 isPrimaryConnected = true
                 mBindingPair.updateView {
-                    mahjongRenderer.render(layoutInstructionGaming, content)
+                    val renderer = sceneRenderersByKey[content.rendererKey]
+                        ?: error("Renderer is not registered: ${content.rendererKey}")
+                    renderer.render(layoutInstructionGaming, content)
                 }
                 refreshConnectionStatus()
             }
             is SdkEvent.ErrorOccurred -> {
-                Log.e("MahjongFramework", "${event.code}: ${event.message}")
+                Log.e("SceneFramework", "${event.code}: ${event.message}")
                 mBindingPair.updateView {
                     tvStatus.text = if (event.recoverable) "单帧失败，继续采集" else "场景错误"
                     tvStatus.setTextColor(getColor(android.R.color.holo_red_light))
                 }
             }
             is SdkEvent.DiagnosticReported -> {
-                Log.i("MahjongFramework", "${event.code}: ${event.message}")
-                if (event.code == "MAHJONG_SESSION_CREATED") {
-                    isPrimaryConnected = true
-                    mBindingPair.updateView {
-                        tvStatus.text = "云端麻将会话已启动"
-                        tvStatus.setTextColor(getColor(R.color.neon_green))
-                    }
-                    refreshConnectionStatus()
-                }
+                Log.i("SceneFramework", "${event.code}: ${event.message}")
             }
         }
     }
 
     private fun handleSdkState(state: SdkState) {
+        val sceneTitle = activeSceneTitle()
         val text = when (state) {
-            SdkState.STARTING -> "正在创建麻将会话"
+            SdkState.STARTING -> "正在启动$sceneTitle"
             SdkState.RUNNING -> "正在等待相机帧"
-            SdkState.STOPPING -> "正在结束麻将会话"
-            SdkState.READY -> "麻将场景已停止"
-            SdkState.ERROR -> "麻将场景错误"
+            SdkState.STOPPING -> "正在结束$sceneTitle"
+            SdkState.READY -> "$sceneTitle 已停止"
+            SdkState.ERROR -> "$sceneTitle 运行错误"
             SdkState.UNINITIALIZED -> "框架未初始化"
         }
         mBindingPair.updateView { tvStatus.text = text }
     }
+
+    private fun activeSceneTitle(): String = sceneRegistrations
+        .firstOrNull { it.provider.sceneId == activeSceneId }
+        ?.presentation
+        ?.menuTitle
+        ?: "场景"
 
     private fun connectSuggestionStream() {
         disconnectSuggestionStream()
@@ -916,7 +1017,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     }
 
     private fun toggleConfigMode() {
-        if (currentMode != UiMode.CONFIG) {
+        if (currentMode != UiMode.LOCAL_CONFIG) {
             showConfigMode()
         }
     }
@@ -1326,7 +1427,4 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         }
     }
 
-    private companion object {
-        const val MAHJONG_SCENE_ID = "mahjong"
-    }
 }

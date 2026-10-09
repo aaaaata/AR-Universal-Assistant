@@ -22,7 +22,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.util.Size
-import com.example.ai_assist.scene.mahjong.framework.MahjongCameraConfig
+import com.example.ai_assist.sdk.framework.ImageCaptureConfig
 import com.example.ai_assist.sdk.framework.CameraScheduler
 import com.example.ai_assist.sdk.framework.CapabilityConfig
 import com.example.ai_assist.sdk.framework.Frame
@@ -53,7 +53,8 @@ class Camera2FrameScheduler(context: Context) : CameraScheduler {
 
     override fun frames(intervalMillis: Long, cameraConfig: CapabilityConfig): Flow<Frame> = flow {
         require(intervalMillis > 0) { "Frame interval must be positive" }
-        val config = cameraConfig as? MahjongCameraConfig ?: MahjongCameraConfig()
+        val config = cameraConfig as? ImageCaptureConfig
+            ?: throw IllegalArgumentException("ImageCaptureConfig is required")
         val resources = open(config)
         synchronized(lock) {
             check(!closed) { "Camera scheduler is closed" }
@@ -92,7 +93,7 @@ class Camera2FrameScheduler(context: Context) : CameraScheduler {
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun open(config: MahjongCameraConfig): CameraResources {
+    private suspend fun open(config: ImageCaptureConfig): CameraResources {
         check(appContext.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             "Camera permission is not granted"
         }
@@ -289,7 +290,7 @@ class Camera2FrameScheduler(context: Context) : CameraScheduler {
     }
 
     private companion object {
-        const val TAG = "MahjongFrameFlow"
+        const val TAG = "SceneFrameFlow"
         const val MAX_IMAGES = 2
         const val JPEG_ORIENTATION_DEGREES = 90
         const val LUMA_DECODE_SAMPLE_SIZE = 16

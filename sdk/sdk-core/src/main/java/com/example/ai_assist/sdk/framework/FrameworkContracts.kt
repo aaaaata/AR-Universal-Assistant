@@ -28,6 +28,13 @@ interface SdkConfig
 /** 场景配置占位。服务地址、采集频率和业务参数由场景定义。 */
 interface SceneConfig
 
+/** 宿主可传给支持网络连接配置的场景的通用参数。 */
+data class SceneConnection(
+    val serverBaseUrl: String,
+    val serviceModeId: String,
+    val captureIntervalMillis: Long
+)
+
 /** 按场景提供敏感凭据。凭据不得进入普通配置或日志。 */
 fun interface CredentialProvider {
     fun credentialFor(sceneId: String): String?
@@ -35,6 +42,13 @@ fun interface CredentialProvider {
 
 /** 硬件能力配置占位。图像尺寸、格式和相机参数以后在这里填。 */
 interface CapabilityConfig
+
+/** CameraScheduler 可读取的通用图像采集参数。 */
+interface ImageCaptureConfig : CapabilityConfig {
+    val preferredWidth: Int
+    val preferredHeight: Int
+    val imageFormat: String
+}
 
 /** 镜腿或触控产生的输入动作。 */
 enum class InputAction {
@@ -182,6 +196,36 @@ interface SceneProvider {
     fun createRenderer(): SceneRenderer
     fun start(sceneContext: SceneContext): Flow<SceneResult>
     fun stop()
+}
+
+/** 可由宿主连接页配置的场景；具体配置类型仍由场景模块创建。 */
+interface ConnectedSceneProvider : SceneProvider {
+    val supportedConnectionSceneIds: Set<String>
+        get() = setOf(sceneId)
+
+    fun createSceneConfig(connection: SceneConnection): SceneConfig
+}
+
+/** 场景在通用菜单中的展示信息。图标资源由场景模块提供。 */
+data class ScenePresentation(
+    val menuTitle: String,
+    val menuIconRes: Int
+) {
+    init {
+        require(menuTitle.isNotBlank()) { "menuTitle must not be blank" }
+        require(menuIconRes != 0) { "menuIconRes must be a valid resource ID" }
+    }
+}
+
+/** 一个可安装场景对宿主暴露的完整注册信息。 */
+data class SceneRegistration(
+    val provider: SceneProvider,
+    val presentation: ScenePresentation
+)
+
+/** 场景模块安装入口。宿主通过清单发现实现，不依赖具体场景类。 */
+fun interface SceneModule {
+    fun createRegistration(): SceneRegistration
 }
 
 /** sdk-core 入口。场景通过它注册和启动。 */

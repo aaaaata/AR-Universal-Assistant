@@ -19,10 +19,20 @@ class ServerConnectionQrParserTest {
     }
 
     @Test
+    fun leavesSceneCompatibilityToTheSelectedProvider() {
+        val config = ServerConnectionQrParser.parse(
+            "rayneo-assist://configure?version=1&scene=future-scene&" +
+                "base_url=https%3A%2F%2Fscene.example.test"
+        )
+
+        assertEquals("future-scene", config.sceneId)
+    }
+
+    @Test
     fun rejectsUnsafeOrIncompatibleConfiguration() {
         listOf(
             "rayneo-assist://configure?version=2&scene=mahjong&base_url=http%3A%2F%2Flocalhost",
-            "rayneo-assist://configure?version=1&scene=other&base_url=http%3A%2F%2Flocalhost",
+            "rayneo-assist://configure?version=1&scene=&base_url=http%3A%2F%2Flocalhost",
             "rayneo-assist://configure?version=1&scene=mahjong&base_url=ftp%3A%2F%2Flocalhost"
         ).forEach { value ->
             assertThrows(IllegalArgumentException::class.java) {

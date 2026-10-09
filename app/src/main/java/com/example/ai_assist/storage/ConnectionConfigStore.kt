@@ -33,7 +33,9 @@ class ConnectionConfigStore(context: Context) {
             ConnectionConfig(
                 version = json.optInt("version", 1),
                 serverUrl = serverUrl,
-                sceneId = json.optString("sceneId", "mahjong"),
+                sceneId = json.getString("sceneId").also {
+                    require(it.isNotBlank()) { "sceneId must not be blank" }
+                },
                 serviceMode = ServiceMode.fromWireValue(json.optString("serviceMode", "local")),
                 streamUrl = json.optString("streamUrl").takeIf { it.isNotBlank() },
                 fps = json.optInt("fps", AppConfig.DEFAULT_CAPTURE_FPS).coerceIn(1, AppConfig.MAX_CAPTURE_FPS),

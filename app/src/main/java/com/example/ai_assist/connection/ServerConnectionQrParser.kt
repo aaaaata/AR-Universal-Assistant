@@ -10,7 +10,6 @@ object ServerConnectionQrParser {
     private const val SCHEME = "rayneo-assist"
     private const val ACTION = "configure"
     private const val VERSION = "1"
-    private val supportedScenes = setOf("mahjong", "mahjong-guangdong")
 
     fun parse(rawValue: String): ConnectionConfig {
         val uri = URI(rawValue.trim())
@@ -22,7 +21,6 @@ object ServerConnectionQrParser {
         val sceneId = requireNotNull(parameters["scene"]?.takeIf(String::isNotBlank)) {
             "Missing scene"
         }
-        require(sceneId in supportedScenes) { "Unsupported scene" }
         val baseUrl = requireNotNull(parameters["base_url"]) { "Missing base_url" }
 
         return ConnectionConfig(
@@ -30,7 +28,7 @@ object ServerConnectionQrParser {
             serverUrl = normalizeBaseUrl(baseUrl),
             sceneId = sceneId,
             serviceMode = ServiceMode.LOCAL,
-            label = "本地麻将服务"
+            label = "本地服务"
         )
     }
 

@@ -1,3 +1,5 @@
 <resources>
-    <string name="app_name">AR麻将助手（本地迁移）</string>
+    <string name="app_name" translatable="false">AR智能助手</string>
+    <string name="scene_add_name" translatable="false">添加场景</string>
+    <string name="scene_catalog_unavailable" translatable="false">场景中心即将开放</string>
 </resources>

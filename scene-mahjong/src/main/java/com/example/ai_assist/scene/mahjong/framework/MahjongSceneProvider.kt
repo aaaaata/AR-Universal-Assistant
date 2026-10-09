@@ -1,10 +1,11 @@
 package com.example.ai_assist.scene.mahjong.framework
 
 import com.example.ai_assist.sdk.framework.CapabilityType
+import com.example.ai_assist.sdk.framework.ConnectedSceneProvider
 import com.example.ai_assist.sdk.framework.SceneConfig
+import com.example.ai_assist.sdk.framework.SceneConnection
 import com.example.ai_assist.sdk.framework.SceneContent
 import com.example.ai_assist.sdk.framework.SceneContext
-import com.example.ai_assist.sdk.framework.SceneProvider
 import com.example.ai_assist.sdk.framework.SceneRenderer
 import com.example.ai_assist.sdk.framework.SceneResult
 import com.example.ai_assist.sdk.framework.SceneSummary
@@ -25,7 +26,7 @@ internal fun interface MahjongCloudServiceFactory {
 class MahjongSceneProvider internal constructor(
     private val serviceFactory: MahjongCloudServiceFactory,
     private val fieldMapper: MahjongFieldMapper
-) : SceneProvider {
+) : ConnectedSceneProvider {
     constructor() : this(
         MahjongCloudServiceFactory(RetrofitMahjongCloudService::create),
         DefaultMahjongFieldMapper()
@@ -36,6 +37,8 @@ class MahjongSceneProvider internal constructor(
     override val version: String = "1.0.0"
     override val requiredCapabilities: List<CapabilityType> =
         listOf(CapabilityType.CAMERA)
+    override val supportedConnectionSceneIds: Set<String> =
+        setOf(sceneId, "mahjong-guangdong")
 
     private val activeJob = AtomicReference<Job?>(null)
     private val renderer = MahjongRenderer()
@@ -44,6 +47,18 @@ class MahjongSceneProvider internal constructor(
     private var captureGuidance = MahjongCaptureGuidance()
 
     override fun createSceneConfig(): SceneConfig = MahjongSceneConfig()
+
+    override fun createSceneConfig(connection: SceneConnection): SceneConfig = MahjongSceneConfig(
+        serverBaseUrl = connection.serverBaseUrl,
+        serviceMode = when (connection.serviceModeId.lowercase()) {
+            "local" -> MahjongServiceMode.LOCAL
+            "cloud" -> MahjongServiceMode.CLOUD
+            else -> throw IllegalArgumentException(
+                "Unsupported Mahjong service mode: ${connection.serviceModeId}"
+            )
+        },
+        captureIntervalMillis = connection.captureIntervalMillis
+    )
 
     override fun createRenderer(): SceneRenderer = renderer
 

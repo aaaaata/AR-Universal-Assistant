@@ -8,14 +8,15 @@ class CloudServiceConnector(
     private val readinessProbe: ServiceReadinessProbe,
     private val cloudBaseUrl: String = AppConfig.CLOUD_SERVER_BASE_URL
 ) {
-    suspend fun connect(): Result<ConnectionConfig> = runCatching {
+    suspend fun connect(sceneId: String): Result<ConnectionConfig> = runCatching {
+        require(sceneId.isNotBlank()) { "sceneId must not be blank" }
         val normalized = ServerConnectionQrParser.normalizeBaseUrl(cloudBaseUrl)
         check(readinessProbe.isReady(normalized)) { "Cloud service is not ready" }
         ConnectionConfig(
             serverUrl = normalized,
-            sceneId = "mahjong",
+            sceneId = sceneId,
             serviceMode = ServiceMode.CLOUD,
-            label = "云端麻将服务"
+            label = "云端服务"
         )
     }
 }

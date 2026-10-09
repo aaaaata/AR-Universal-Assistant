@@ -14,11 +14,12 @@ class CloudServiceConnectorTest {
             cloudBaseUrl = "https://cloud.example.test/api"
         )
 
-        val config = connector.connect().getOrThrow()
+        val config = connector.connect("fake-scene").getOrThrow()
 
         assertEquals("https://cloud.example.test/api/", config.serverUrl)
         assertEquals(ServiceMode.CLOUD, config.serviceMode)
-        assertEquals("云端麻将服务", config.label)
+        assertEquals("fake-scene", config.sceneId)
+        assertEquals("云端服务", config.label)
     }
 
     @Test
@@ -26,7 +27,7 @@ class CloudServiceConnectorTest {
         val result = CloudServiceConnector(
             readinessProbe = ServiceReadinessProbe { false },
             cloudBaseUrl = "https://cloud.example.test/"
-        ).connect()
+        ).connect("fake-scene")
 
         assertTrue(result.isFailure)
     }

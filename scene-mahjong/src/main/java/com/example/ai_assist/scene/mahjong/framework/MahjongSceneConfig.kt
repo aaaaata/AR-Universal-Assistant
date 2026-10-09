@@ -1,16 +1,17 @@
 package com.example.ai_assist.scene.mahjong.framework
 
 import com.example.ai_assist.sdk.framework.CapabilityConfig
+import com.example.ai_assist.sdk.framework.ImageCaptureConfig
 import com.example.ai_assist.sdk.framework.SceneConfig
 
 enum class MahjongServiceMode { LOCAL, CLOUD }
 
 /** 麻将场景使用的相机参数。具体分辨率由相机能力实现选择。 */
 data class MahjongCameraConfig(
-    val preferredWidth: Int = 1280,
-    val preferredHeight: Int = 720,
-    val imageFormat: String = "JPEG"
-) : CapabilityConfig {
+    override val preferredWidth: Int = 1280,
+    override val preferredHeight: Int = 720,
+    override val imageFormat: String = "JPEG"
+) : ImageCaptureConfig {
     init {
         require(preferredWidth > 0) { "preferredWidth must be positive" }
         require(preferredHeight > 0) { "preferredHeight must be positive" }
