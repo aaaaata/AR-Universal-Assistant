@@ -831,4 +831,30 @@
         </LinearLayout>
     </FrameLayout>
 
+    <FrameLayout
+        android:id="@+id/launch_options_page"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/black"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/launch_options_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="28dp"
+            android:textColor="@color/neon_green"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:id="@+id/launch_options_container"
+            android:layout_width="match_parent"
+            android:layout_height="114dp"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="horizontal" />
+    </FrameLayout>
+
 </FrameLayout>

@@ -1,13 +1,13 @@
 package com.example.ai_assist.scene.mahjong.framework
 
 import com.example.ai_assist.sdk.framework.CapabilityType
-import com.example.ai_assist.sdk.framework.ConnectedSceneProvider
 import com.example.ai_assist.sdk.framework.SceneConfig
-import com.example.ai_assist.sdk.framework.SceneConnection
 import com.example.ai_assist.sdk.framework.SceneContent
 import com.example.ai_assist.sdk.framework.SceneContext
+import com.example.ai_assist.sdk.framework.SceneLaunchProvider
 import com.example.ai_assist.sdk.framework.SceneRenderer
 import com.example.ai_assist.sdk.framework.SceneResult
+import com.example.ai_assist.sdk.framework.SceneStartMode
 import com.example.ai_assist.sdk.framework.SceneSummary
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
@@ -26,7 +26,7 @@ internal fun interface MahjongCloudServiceFactory {
 class MahjongSceneProvider internal constructor(
     private val serviceFactory: MahjongCloudServiceFactory,
     private val fieldMapper: MahjongFieldMapper
-) : ConnectedSceneProvider {
+) : SceneLaunchProvider {
     constructor() : this(
         MahjongCloudServiceFactory(RetrofitMahjongCloudService::create),
         DefaultMahjongFieldMapper()
@@ -37,8 +37,11 @@ class MahjongSceneProvider internal constructor(
     override val version: String = "1.0.0"
     override val requiredCapabilities: List<CapabilityType> =
         listOf(CapabilityType.CAMERA)
-    override val supportedConnectionSceneIds: Set<String> =
-        setOf(sceneId, "mahjong-guangdong")
+    override val supportedConnectionSceneIds: Set<String> = setOf(sceneId, "mahjong-guangdong")
+    override val startModes: List<SceneStartMode> = listOf(
+        SceneStartMode(MahjongRecordingMode.RECORD.wireValue, "录制对局"),
+        SceneStartMode(MahjongRecordingMode.NORMAL.wireValue, "普通对局")
+    )
 
     private val activeJob = AtomicReference<Job?>(null)
     private val renderer = MahjongRenderer()
@@ -48,17 +51,33 @@ class MahjongSceneProvider internal constructor(
 
     override fun createSceneConfig(): SceneConfig = MahjongSceneConfig()
 
-    override fun createSceneConfig(connection: SceneConnection): SceneConfig = MahjongSceneConfig(
-        serverBaseUrl = connection.serverBaseUrl,
-        serviceMode = when (connection.serviceModeId.lowercase()) {
-            "local" -> MahjongServiceMode.LOCAL
-            "cloud" -> MahjongServiceMode.CLOUD
-            else -> throw IllegalArgumentException(
-                "Unsupported Mahjong service mode: ${connection.serviceModeId}"
-            )
-        },
-        captureIntervalMillis = connection.captureIntervalMillis
-    )
+    override fun createSceneConfig(
+        connection: com.example.ai_assist.sdk.framework.SceneConnection?,
+        startModeId: String?
+    ): SceneConfig {
+        val requiredConnection = requireNotNull(connection) {
+            "Mahjong scene requires a service connection"
+        }
+        val recordingModeId = requireNotNull(startModeId) {
+            "Mahjong scene requires a game mode"
+        }
+        return MahjongSceneConfig(
+            serverBaseUrl = requiredConnection.serverBaseUrl,
+            serviceMode = when (requiredConnection.serviceModeId.lowercase()) {
+                "local" -> MahjongServiceMode.LOCAL
+                "cloud" -> MahjongServiceMode.CLOUD
+                else -> throw IllegalArgumentException(
+                    "Unsupported Mahjong service mode: ${requiredConnection.serviceModeId}"
+                )
+            },
+            recordingMode = MahjongRecordingMode.entries.firstOrNull {
+                it.wireValue == recordingModeId
+            } ?: throw IllegalArgumentException(
+                "Unsupported Mahjong recording mode: $recordingModeId"
+            ),
+            captureIntervalMillis = requiredConnection.captureIntervalMillis
+        )
+    }
 
     override fun createRenderer(): SceneRenderer = renderer
 
@@ -216,4 +235,5 @@ class MahjongSceneProvider internal constructor(
         context.reportError(code, message, recoverable = false)
         throw IllegalStateException(message, cause)
     }
+
 }

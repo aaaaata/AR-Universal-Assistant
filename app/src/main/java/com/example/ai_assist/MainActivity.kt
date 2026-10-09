@@ -34,6 +34,8 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
+import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -53,9 +55,9 @@ import com.example.ai_assist.repository.ChatRepository
 import com.example.ai_assist.service.GameApiService
 import com.example.ai_assist.service.RayNeoDeviceManager
 import com.example.ai_assist.sdk.framework.CredentialProvider
-import com.example.ai_assist.sdk.framework.ConnectedSceneProvider
 import com.example.ai_assist.sdk.framework.DefaultCvGameCore
 import com.example.ai_assist.sdk.framework.SceneConnection
+import com.example.ai_assist.sdk.framework.SceneLaunchProvider
 import com.example.ai_assist.sdk.framework.SceneRegistration
 import com.example.ai_assist.sdk.framework.SceneRenderer
 import com.example.ai_assist.sdk.framework.SdkEvent
@@ -91,7 +93,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
 
-    private enum class UiMode { SCENE_MENU, SERVICE_SELECTION, LOCAL_CONFIG, CLOUD_CONFIG, STREAMING }
+    private enum class UiMode {
+        SCENE_MENU,
+        SERVICE_SELECTION,
+        LOCAL_CONFIG,
+        CLOUD_CONFIG,
+        LAUNCH_OPTIONS,
+        STREAMING
+    }
 
     private lateinit var viewModel: ChatViewModel
     private lateinit var cameraExecutor: ExecutorService
@@ -127,6 +136,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private var suggestionSocket: WebSocket? = null
     private var serviceFocusIndex = 0
     private var configFocusIndex = 0
+    private var launchOptionFocusIndex = 0
+    private var selectedStartModeId: String? = null
     private var isPrimaryConnected = false
     private var isSuggestionStreamConnected = false
     private var isCloudConnectionInFlight = false
@@ -188,7 +199,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         if (::sceneCore.isInitialized) sceneCore.onAppForeground()
         if (currentMode == UiMode.STREAMING && !hasStartedCamera) {
             startStreamingUi()
-            activeConfig?.let(::startFrameworkScene)
+            startFrameworkScene()
         }
     }
 
@@ -273,12 +284,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             btnLocalConnection.setOnClickListener {
                 serviceFocusIndex = 0
                 updateServiceFocusUi()
-                showConfigMode()
+                activateFocusedServiceAction()
             }
             btnCloudConnection.setOnClickListener {
                 serviceFocusIndex = 1
                 updateServiceFocusUi()
-                showCloudConfigMode()
+                activateFocusedServiceAction()
             }
             btnRetryCloudConnection.setOnClickListener { connectCloudService() }
             btnScanConfig.setOnClickListener {
@@ -299,12 +310,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             serviceSelectionLocalButton.setOnClickListener {
                 serviceFocusIndex = 0
                 updateServiceFocusUi()
-                showConfigMode()
+                activateFocusedServiceAction()
             }
             serviceSelectionCloudButton.setOnClickListener {
                 serviceFocusIndex = 1
                 updateServiceFocusUi()
-                showCloudConfigMode()
+                activateFocusedServiceAction()
             }
             localConfigScanButton.setOnClickListener {
                 configFocusIndex = 0
@@ -393,18 +404,20 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                         UiMode.SCENE_MENU -> moveSceneFocus(1)
                         UiMode.SERVICE_SELECTION -> moveServiceFocus(1)
                         UiMode.LOCAL_CONFIG -> moveConfigFocus(1)
+                        UiMode.LAUNCH_OPTIONS -> moveLaunchOptionFocus(1)
                         UiMode.CLOUD_CONFIG, UiMode.STREAMING -> Unit
                     }
                     is TempleAction.SlideBackward -> when (currentMode) {
                         UiMode.SCENE_MENU -> moveSceneFocus(-1)
                         UiMode.SERVICE_SELECTION -> moveServiceFocus(-1)
                         UiMode.LOCAL_CONFIG -> moveConfigFocus(-1)
+                        UiMode.LAUNCH_OPTIONS -> moveLaunchOptionFocus(-1)
                         UiMode.CLOUD_CONFIG, UiMode.STREAMING -> Unit
                     }
                     is TempleAction.SlideUpwards -> {
                         when (currentMode) {
                             UiMode.SCENE_MENU -> Unit
-                            UiMode.SERVICE_SELECTION, UiMode.LOCAL_CONFIG -> Unit
+                            UiMode.SERVICE_SELECTION, UiMode.LOCAL_CONFIG, UiMode.LAUNCH_OPTIONS -> Unit
                             UiMode.STREAMING -> Unit
                             UiMode.CLOUD_CONFIG -> Unit
                         }
@@ -412,7 +425,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
                     is TempleAction.SlideDownwards -> {
                         when (currentMode) {
                             UiMode.SCENE_MENU -> Unit
-                            UiMode.SERVICE_SELECTION, UiMode.LOCAL_CONFIG -> Unit
+                            UiMode.SERVICE_SELECTION, UiMode.LOCAL_CONFIG, UiMode.LAUNCH_OPTIONS -> Unit
                             UiMode.STREAMING -> Unit
                             UiMode.CLOUD_CONFIG -> Unit
                         }
@@ -439,6 +452,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             UiMode.SCENE_MENU -> finish()
             UiMode.SERVICE_SELECTION -> showSceneMenu()
             UiMode.LOCAL_CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
+            UiMode.LAUNCH_OPTIONS -> navigateBackFromLaunchOptions()
             UiMode.STREAMING -> {
                 stopStreaming()
                 finish()
@@ -458,6 +472,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             UiMode.SERVICE_SELECTION -> activateFocusedServiceAction()
             UiMode.LOCAL_CONFIG -> activateFocusedConfigAction()
             UiMode.CLOUD_CONFIG -> connectCloudService()
+            UiMode.LAUNCH_OPTIONS -> activateFocusedLaunchOption()
             UiMode.STREAMING -> Unit
         }
     }
@@ -479,9 +494,18 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             return
         }
         activeSceneId = registration.provider.sceneId
-        activeConfig = configStore.load()?.takeIf(::isConnectionForActiveScene)
-        configFocusIndex = if (activeConfig == null) 0 else 1
-        showServiceSelectionMode()
+        selectedStartModeId = null
+        launchOptionFocusIndex = 0
+        serviceFocusIndex = 0
+        val launchProvider = registration.provider as? SceneLaunchProvider
+        if (launchProvider?.supportedConnectionSceneIds?.isNotEmpty() == true) {
+            activeConfig = configStore.load()?.takeIf(::isConnectionForActiveScene)
+            configFocusIndex = if (activeConfig == null) 0 else 1
+            showServiceSelectionMode()
+        } else {
+            activeConfig = null
+            continueSceneLaunch()
+        }
     }
 
     private fun moveServiceFocus(direction: Int) {
@@ -516,6 +540,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             UiMode.SCENE_MENU -> Unit
             UiMode.SERVICE_SELECTION -> showCustomToast("请选择连接方式")
             UiMode.LOCAL_CONFIG, UiMode.CLOUD_CONFIG -> showServiceSelectionMode()
+            UiMode.LAUNCH_OPTIONS -> navigateBackFromLaunchOptions()
             UiMode.STREAMING -> {
                 stopStreaming()
                 showConfigMode()
@@ -586,18 +611,19 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             if (persistOnSuccess) {
                 configStore.save(normalizedConfig)
             }
-            applyConnectionConfig(normalizedConfig, startStreaming = !persistOnSuccess)
+            applyConnectionConfig(normalizedConfig, continueLaunch = true)
             mBindingPair.updateView { tvStatus.text = "服务已连接" }
             showCustomToast(if (persistOnSuccess) "连接成功，配置已保存" else "已连接保存的服务")
         }
     }
 
     private fun isConnectionForActiveScene(config: ConnectionConfig): Boolean {
-        val provider = sceneRegistrations
-            .firstOrNull { it.provider.sceneId == activeSceneId }
-            ?.provider as? ConnectedSceneProvider ?: return false
-        return config.sceneId in provider.supportedConnectionSceneIds
+        return config.sceneId in activeLaunchProvider()?.supportedConnectionSceneIds.orEmpty()
     }
+
+    private fun activeLaunchProvider(): SceneLaunchProvider? = sceneRegistrations
+        .firstOrNull { it.provider.sceneId == activeSceneId }
+        ?.provider as? SceneLaunchProvider
 
     private fun showSceneMenu() {
         currentMode = UiMode.SCENE_MENU
@@ -608,11 +634,12 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutSceneMenuContainer.visibility = View.VISIBLE
             serviceSelectionPage.visibility = View.GONE
             localConfigPage.visibility = View.GONE
+            launchOptionsPage.visibility = View.GONE
         }
         renderSceneMenu()
     }
 
-    private fun applyConnectionConfig(config: ConnectionConfig, startStreaming: Boolean) {
+    private fun applyConnectionConfig(config: ConnectionConfig, continueLaunch: Boolean) {
         val hasConfigChanged = activeConfig != null && activeConfig != config
         if (hasConfigChanged) {
             sceneCore.stopScene()
@@ -621,8 +648,8 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         activeConfig = config
         viewModel.updateConnection(config)
         updateConnectionSummary(config)
-        if (startStreaming) {
-            startStreaming()
+        if (continueLaunch) {
+            continueSceneLaunch()
         }
     }
 
@@ -645,6 +672,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutSceneMenuContainer.visibility = View.GONE
             serviceSelectionPage.visibility = View.VISIBLE
             localConfigPage.visibility = View.GONE
+            launchOptionsPage.visibility = View.GONE
         }
         updateServiceFocusUi()
     }
@@ -659,6 +687,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutSceneMenuContainer.visibility = View.GONE
             serviceSelectionPage.visibility = View.GONE
             localConfigPage.visibility = View.VISIBLE
+            launchOptionsPage.visibility = View.GONE
         }
         updateConfigFocusUi()
     }
@@ -673,6 +702,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutSceneMenuContainer.visibility = View.GONE
             serviceSelectionPage.visibility = View.GONE
             localConfigPage.visibility = View.GONE
+            launchOptionsPage.visibility = View.GONE
             layoutServiceSelectionContainer.visibility = View.GONE
             layoutConfigContainer.visibility = View.GONE
             layoutCloudConfigContainer.visibility = View.VISIBLE
@@ -695,7 +725,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     private fun connectCloudService() {
         if (currentMode != UiMode.CLOUD_CONFIG || isCloudConnectionInFlight) return
         if (isCloudServiceReady && activeConfig?.serviceMode == ServiceMode.CLOUD) {
-            startStreaming()
+            continueSceneLaunch()
             return
         }
         isCloudConnectionInFlight = true
@@ -711,14 +741,14 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             if (currentMode != UiMode.CLOUD_CONFIG) return@launch
             result
                 .onSuccess { config ->
-                    applyConnectionConfig(config, startStreaming = false)
+                    applyConnectionConfig(config, continueLaunch = false)
                     isCloudServiceReady = true
                     mBindingPair.updateView {
                         tvCloudConnectionStatus.text = "云端服务连接成功"
                         tvCloudConnectionStatus.setTextColor(getColor(R.color.neon_green))
                         tvCloudEndpoint.text = config.serverUrl
                         btnRetryCloudConnection.isEnabled = true
-                        btnRetryCloudConnection.text = "启动场景"
+                        btnRetryCloudConnection.text = nextLaunchActionLabel()
                     }
                 }
                 .onFailure {
@@ -733,13 +763,111 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         }
     }
 
+    private fun continueSceneLaunch() {
+        val provider = activeLaunchProvider()
+        if (provider == null) {
+            startStreaming()
+            return
+        }
+        if (provider.supportedConnectionSceneIds.isNotEmpty() && activeConfig == null) {
+            showCustomToast("请先完成连接配置")
+            showServiceSelectionMode()
+            return
+        }
+        if (provider.startModes.isNotEmpty() && selectedStartModeId == null) {
+            showLaunchOptionsMode()
+        } else {
+            startStreaming()
+        }
+    }
+
+    private fun showLaunchOptionsMode() {
+        val modes = activeLaunchProvider()?.startModes.orEmpty()
+        if (modes.isEmpty()) {
+                startStreaming()
+                return
+        }
+        launchOptionFocusIndex = modes.indexOfFirst {
+            it.id == selectedStartModeId
+        }.takeIf { it >= 0 } ?: 0
+        currentMode = UiMode.LAUNCH_OPTIONS
+        stopCaptureLoop()
+        closeCamera()
+        mBindingPair.updateView {
+            appContentRoot.visibility = View.GONE
+            layoutSceneMenuContainer.visibility = View.GONE
+            serviceSelectionPage.visibility = View.GONE
+            localConfigPage.visibility = View.GONE
+            launchOptionsPage.visibility = View.VISIBLE
+        }
+        renderLaunchOptions()
+    }
+
+    private fun renderLaunchOptions() {
+        val modes = activeLaunchProvider()?.startModes.orEmpty()
+        if (modes.isEmpty()) return
+        mBindingPair.updateView {
+            launchOptionsTitle.text = "启动选项"
+            launchOptionsContainer.removeAllViews()
+            modes.forEachIndexed { index, option ->
+                val button = Button(this@MainActivity).apply {
+                    text = option.label
+                    textSize = 18f
+                    isAllCaps = false
+                    setTextColor(getColor(android.R.color.white))
+                    setBackgroundResource(R.drawable.bg_service_selection_button)
+                    isActivated = index == launchOptionFocusIndex
+                    setOnClickListener {
+                        launchOptionFocusIndex = index
+                        renderLaunchOptions()
+                        activateFocusedLaunchOption()
+                    }
+                }
+                val params = LinearLayout.LayoutParams(118.dp, 114.dp).apply {
+                    if (index < modes.lastIndex) marginEnd = 52.dp
+                }
+                launchOptionsContainer.addView(button, params)
+                if (index == launchOptionFocusIndex) button.requestFocus()
+            }
+        }
+    }
+
+    private fun moveLaunchOptionFocus(direction: Int) {
+        val optionCount = activeLaunchProvider()?.startModes?.size ?: return
+        launchOptionFocusIndex =
+            (launchOptionFocusIndex + direction + optionCount) % optionCount
+        renderLaunchOptions()
+    }
+
+    private fun activateFocusedLaunchOption() {
+        val option = activeLaunchProvider()
+            ?.startModes
+            ?.getOrNull(launchOptionFocusIndex)
+            ?: return
+        selectedStartModeId = option.id
+        continueSceneLaunch()
+    }
+
+    private fun navigateBackFromLaunchOptions() {
+        if (activeLaunchProvider()?.supportedConnectionSceneIds?.isNotEmpty() == true) {
+            showServiceSelectionMode()
+        } else {
+            showSceneMenu()
+        }
+    }
+
+    private fun nextLaunchActionLabel(): String = if (activeLaunchProvider()?.startModes.isNullOrEmpty()) {
+        "启动场景"
+    } else {
+        "选择启动选项"
+    }
+
     private fun startStreaming() {
-        val config = activeConfig ?: return
         currentMode = UiMode.STREAMING
         isPrimaryConnected = false
         isSuggestionStreamConnected = false
         startStreamingUi()
-        startFrameworkScene(config)
+        startFrameworkScene()
     }
 
     private fun startStreamingUi() {
@@ -749,6 +877,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             layoutSceneMenuContainer.visibility = View.GONE
             serviceSelectionPage.visibility = View.GONE
             localConfigPage.visibility = View.GONE
+            launchOptionsPage.visibility = View.GONE
             layoutServiceSelectionContainer.visibility = View.GONE
             layoutConfigContainer.visibility = View.GONE
             layoutCloudConfigContainer.visibility = View.GONE
@@ -785,24 +914,29 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         viewModel.endCurrentSession()
     }
 
-    private fun startFrameworkScene(connection: ConnectionConfig) {
+    private fun startFrameworkScene() {
         sceneEventsJob?.cancel()
         val sceneId = activeSceneId ?: return
         val provider = sceneRegistrations
             .firstOrNull { it.provider.sceneId == sceneId }
-            ?.provider as? ConnectedSceneProvider
-        if (provider == null) {
-            showCustomToast("当前场景不支持连接配置")
-            return
-        }
-        val fps = connection.fps.coerceIn(1, AppConfig.MAX_CAPTURE_FPS)
-        val sceneConfig = provider.createSceneConfig(
-            SceneConnection(
-                serverBaseUrl = connection.serverUrl,
-                serviceModeId = connection.serviceMode.wireValue,
-                captureIntervalMillis = 1_000L / fps
+            ?.provider
+            ?: return
+        val sceneConfig = if (provider is SceneLaunchProvider) {
+            val connection = activeConfig?.let {
+                val fps = it.fps.coerceIn(1, AppConfig.MAX_CAPTURE_FPS)
+                SceneConnection(
+                    serverBaseUrl = it.serverUrl,
+                    serviceModeId = it.serviceMode.wireValue,
+                    captureIntervalMillis = 1_000L / fps
+                )
+            }
+            provider.createSceneConfig(
+                connection = connection,
+                startModeId = selectedStartModeId
             )
-        )
+        } else {
+            provider.createSceneConfig()
+        }
         sceneEventsJob = lifecycleScope.launch {
             runCatching {
                 if (sceneCore.getCurrentState() != SdkState.READY) {
@@ -822,6 +956,9 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             }
         }
     }
+
+    private val Int.dp: Int
+        get() = (this * resources.displayMetrics.density).toInt()
 
     private fun handleSdkEvent(event: SdkEvent) {
         when (event) {

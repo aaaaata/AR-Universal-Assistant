@@ -27,16 +27,21 @@ import org.junit.Test
 class MahjongSceneProviderTest {
     @Test
     fun mapsGenericConnectionIntoMahjongSceneConfig() {
-        val config = MahjongSceneProvider().createSceneConfig(
-            SceneConnection(
+        val provider = MahjongSceneProvider()
+        val config = provider.createSceneConfig(
+            connection = SceneConnection(
                 serverBaseUrl = "http://192.168.1.2:8000/",
                 serviceModeId = "local",
                 captureIntervalMillis = 500L
-            )
+            ),
+            startModeId = "regression"
         ) as MahjongSceneConfig
 
+        assertEquals(setOf("mahjong", "mahjong-guangdong"), provider.supportedConnectionSceneIds)
+        assertEquals(listOf("regression", "normal"), provider.startModes.map { it.id })
         assertEquals("http://192.168.1.2:8000/", config.serverBaseUrl)
         assertEquals(MahjongServiceMode.LOCAL, config.serviceMode)
+        assertEquals(MahjongRecordingMode.RECORD, config.recordingMode)
         assertEquals(500L, config.captureIntervalMillis)
     }
 

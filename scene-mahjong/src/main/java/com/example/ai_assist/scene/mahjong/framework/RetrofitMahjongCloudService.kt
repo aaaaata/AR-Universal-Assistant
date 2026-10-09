@@ -92,7 +92,7 @@ class RetrofitMahjongCloudService internal constructor(
                 api = api,
                 apiKey = apiKey,
                 ruleProfileId = config.ruleProfileId,
-                recordingMode = config.recordingMode
+                recordingMode = config.recordingMode.wireValue
             )
         }
     }

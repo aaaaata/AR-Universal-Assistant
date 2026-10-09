@@ -28,12 +28,23 @@ interface SdkConfig
 /** 场景配置占位。服务地址、采集频率和业务参数由场景定义。 */
 interface SceneConfig
 
-/** 宿主可传给支持网络连接配置的场景的通用参数。 */
+/** 宿主完成连接配置后传给场景的通用参数。 */
 data class SceneConnection(
     val serverBaseUrl: String,
     val serviceModeId: String,
     val captureIntervalMillis: Long
 )
+
+/** 场景启动前的一项业务选择。宿主只展示，不解释 ID 的业务含义。 */
+data class SceneStartMode(
+    val id: String,
+    val label: String
+) {
+    init {
+        require(id.isNotBlank()) { "start mode ID must not be blank" }
+        require(label.isNotBlank()) { "start mode label must not be blank" }
+    }
+}
 
 /** 按场景提供敏感凭据。凭据不得进入普通配置或日志。 */
 fun interface CredentialProvider {
@@ -198,12 +209,18 @@ interface SceneProvider {
     fun stop()
 }
 
-/** 可由宿主连接页配置的场景；具体配置类型仍由场景模块创建。 */
-interface ConnectedSceneProvider : SceneProvider {
+/** 可选启动配置的场景。未实现此接口的场景可直接使用默认配置启动。 */
+interface SceneLaunchProvider : SceneProvider {
+    /** 空集代表不需要经过宿主本地/云端连接流程。 */
     val supportedConnectionSceneIds: Set<String>
-        get() = setOf(sceneId)
+        get() = emptySet()
 
-    fun createSceneConfig(connection: SceneConnection): SceneConfig
+    /** 空列表代表没有业务启动选项。 */
+    val startModes: List<SceneStartMode>
+        get() = emptyList()
+
+    /** 由场景解释 [connection] 和 [startModeId]，构造自己的私有配置。 */
+    fun createSceneConfig(connection: SceneConnection?, startModeId: String?): SceneConfig
 }
 
 /** 场景在通用菜单中的展示信息。图标资源由场景模块提供。 */
