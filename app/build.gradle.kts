@@ -29,12 +29,6 @@ android {
 
         buildConfigField(
             "String",
-            "CLOUD_SERVER_BASE_URL",
-            gradleProperty("CLOUD_SERVER_BASE_URL", "http://39.96.67.192:8552/")
-                .asBuildConfigString()
-        )
-        buildConfigField(
-            "String",
             "CLOUD_API_KEY",
             gradleProperty("CLOUD_API_KEY", "local-token").asBuildConfigString()
         )

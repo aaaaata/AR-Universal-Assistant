@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
+import android.view.Surface
+import android.view.WindowManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -51,18 +53,36 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
         val config = cameraConfig as? AndroidCameraConfig ?: AndroidCameraConfig()
         val cameraId = cameraManager.cameraIdList.firstOrNull()
             ?: error("No camera is available")
-        val rotation = cameraManager.getCameraCharacteristics(cameraId)
-            .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        val jpegOrientation = jpegRotationDegrees(characteristics)
         open(cameraId, config)
         try {
             while (currentCoroutineContext().isActive) {
                 val startedAt = System.currentTimeMillis()
-                emit(capture(config, rotation))
+                emit(capture(config, jpegOrientation))
                 val elapsed = System.currentTimeMillis() - startedAt
                 delay((intervalMillis - elapsed).coerceAtLeast(0L))
             }
         } finally {
             closeCamera()
+        }
+    }
+
+    private fun jpegRotationDegrees(characteristics: CameraCharacteristics): Int {
+        val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
+        val displayRotation = appContext.getSystemService(WindowManager::class.java)
+            ?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+        val deviceDegrees = when (displayRotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        return if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+            (sensorOrientation + deviceDegrees) % 360
+        } else {
+            (sensorOrientation - deviceDegrees + 360) % 360
         }
     }
 
@@ -125,7 +145,7 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
         }
     }
 
-    private suspend fun capture(config: AndroidCameraConfig, rotation: Int): Frame =
+    private suspend fun capture(config: AndroidCameraConfig, jpegOrientation: Int): Frame =
         suspendCancellableCoroutine { continuation ->
             val camera = synchronized(lock) { cameraDevice } ?: run {
                 continuation.resumeWithException(IllegalStateException("Camera is closed"))
@@ -147,7 +167,9 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
                     val file = File.createTempFile("cv-frame-", ".jpg", appContext.cacheDir)
                     FileOutputStream(file).use { it.write(bytes) }
                     if (continuation.isActive) {
-                        continuation.resume(Frame(file, rotation, System.currentTimeMillis()))
+                        continuation.resume(
+                            Frame(file, JPEG_FRAME_ROTATION_DEGREES, System.currentTimeMillis())
+                        )
                     } else {
                         file.delete()
                     }
@@ -161,6 +183,7 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
             val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
                 set(CaptureRequest.JPEG_QUALITY, config.jpegQuality)
+                set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
             }.build()
             session.capture(request, null, null)
@@ -180,5 +203,10 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
             imageReader?.close()
             imageReader = null
         }
+    }
+
+    private companion object {
+        // JPEG_ORIENTATION is embedded by Camera2, so the uploaded encoded frame needs no rotation.
+        const val JPEG_FRAME_ROTATION_DEGREES = 0
     }
 }

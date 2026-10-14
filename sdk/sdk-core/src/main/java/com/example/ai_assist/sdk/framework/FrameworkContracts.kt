@@ -243,6 +243,7 @@ fun interface SceneModule {
 
 /** sdk-core 入口。场景通过它注册和启动。 */
 interface CvGameCore {
+    /** UNINITIALIZED -> READY；READY 状态重复调用保持幂等。 */
     fun initialize()
     fun registerScene(provider: SceneProvider)
     fun unregisterScene(sceneId: String)
@@ -289,6 +290,8 @@ interface EventDispatcher {
 
 /** 能力租约。Core 管生命周期，Capability 管硬件操作。 */
 interface ResourceManager {
+    /** Returns whether this host has registered an implementation for [type]. */
+    fun supports(type: CapabilityType): Boolean
     fun acquire(type: CapabilityType, sceneId: String): CapabilityLease
     fun releaseAll()
 }

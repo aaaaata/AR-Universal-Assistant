@@ -173,17 +173,12 @@ ARmahjongAssist/
 app/
 ├── libs/                    # 外部依赖库 (RayNeo SDK)
 ├── src/main/java/com/example/ai_assist/
-│   ├── model/               # 数据模型 (API 响应实体、会话状态)
-│   ├── repository/          # 数据仓库层 (处理 API 调用与数据流)
-│   ├── service/             # 核心服务模块
-│   │   ├── GameApiService.kt      # Retrofit 接口定义 (与 Server 通信)
-│   │   └── RayNeoDeviceManager.kt # RayNeo 硬件控制 (按键、传感器)
-│   ├── utils/               # 工具类
-│   │   ├── RayNeoAudioRecorder.kt # 音频录制工具
-│   │   └── MahjongMapper.kt       # 麻将编码映射工具
-│   ├── viewmodel/           # MVVM ViewModel (UI 状态管理)
-│   └── MainActivity.kt      # 主界面入口
-│   └── src/main/res/            # UI 资源文件 (布局、图标、样式)
+│   ├── framework/           # 场景模块注册与宿主能力适配
+│   └── MainActivity.kt      # 通用场景列表、容器和输入适配
+└── src/main/res/            # 通用壳 UI 资源
+
+scene-mahjong/               # 麻将连接、开局流程、云端业务和 HUD
+sdk/sdk-core/                # Core 状态机、能力租约、会话与 Camera Frame Flow
 ```
 
 ### Server 目录详解

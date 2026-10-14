@@ -197,8 +197,10 @@ class FrameworkRuntime(
 
     @Synchronized
     override fun initialize() {
-        if (stateMachine.state.value == SdkState.UNINITIALIZED) {
-            stateMachine.transition(SdkState.READY)
+        when (stateMachine.state.value) {
+            SdkState.UNINITIALIZED -> stateMachine.transition(SdkState.READY)
+            SdkState.READY -> Unit
+            else -> error("Cannot initialize SDK while state is ${stateMachine.state.value}")
         }
     }
 
@@ -227,6 +229,10 @@ class FrameworkRuntime(
                 "SDK is not ready: ${stateMachine.state.value}"
             }
             provider = requireNotNull(providers[sceneId]) { "Scene is not registered: $sceneId" }
+            val unsupported = provider.requiredCapabilities.filterNot(resourceManager::supports)
+            check(unsupported.isEmpty()) {
+                "Scene $sceneId requires unsupported capabilities: $unsupported"
+            }
             sessionId = UUID.randomUUID().toString()
             context = DefaultSceneContext(
                 sessionId = sessionId,
@@ -374,11 +380,16 @@ class FrameworkRuntime(
 }
 
 class DefaultResourceManager(
+    private val supportedCapabilities: Set<CapabilityType> =
+        setOf(CapabilityType.CAMERA, CapabilityType.INPUT),
     private val onReleaseAll: () -> Unit = {}
 ) : ResourceManager {
     private val owners = mutableMapOf<CapabilityType, String>()
 
+    override fun supports(type: CapabilityType): Boolean = type in supportedCapabilities
+
     override fun acquire(type: CapabilityType, sceneId: String): CapabilityLease = synchronized(owners) {
+        check(supports(type)) { "Capability is not supported by this host: $type" }
         val owner = owners[type]
         require(owner == null || owner == sceneId) { "$type is already owned by $owner" }
         owners[type] = sceneId
