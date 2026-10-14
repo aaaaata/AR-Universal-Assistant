@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name" translatable="false">AR智能助手-重构版</string>
+    <string name="app_name" translatable="false">AR智能助手</string>
     <string name="status_ready" translatable="false">场景已就绪</string>
     <string name="instruction_start_scene" translatable="false">三击开始场景</string>
     <string name="instruction_stop_scene" translatable="false">场景运行中 · 三击结束</string>

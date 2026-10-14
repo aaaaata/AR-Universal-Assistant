@@ -68,6 +68,10 @@ data class MahjongAnalyzeResult(
     val confidence: MahjongConfidence? = null,
     val warnings: List<String> = emptyList()
 ) : MahjongCloudResult {
+    fun effectiveTileCount(): Int = handTiles.size +
+        meldGroups.sumOf { it.tiles.size } -
+        meldGroups.count { it.type == "kan" }
+
     fun diagnosticMessage(): String = when (diagnosticCode) {
         "TOO_MANY_REGIONS" -> "牌区过多，请重新取景"
         "HAND_REGION_NOT_FOUND" -> "未找到手牌区，请重新取景"
@@ -81,8 +85,8 @@ data class MahjongAnalyzeResult(
 
     fun summaryTitle(payload: MahjongScenePayload): String = when {
         status == "diagnostic" -> diagnosticMessage().ifBlank { "识别异常，请重拍" }
-        handTiles.size == 14 -> "手牌 14 张，${payload.suggestedPlay}"
-        handTiles.size == 13 -> "手牌 13 张，${payload.suggestedPlay}"
+        effectiveTileCount() == 14 -> "手牌 14 张，${payload.suggestedPlay}"
+        effectiveTileCount() == 13 -> "手牌 13 张，${payload.suggestedPlay}"
         else -> "麻将分析完成"
     }
 }
@@ -194,9 +198,10 @@ internal object DefaultMahjongFieldMapper : MahjongFieldMapper {
             "discard" -> response.suggestion.suggestion?.jinzhangTiles.orEmpty()
             else -> response.suggestion?.jinzhangTiles.orEmpty()
         }
+        val effectiveTileCount = response.effectiveTileCount()
         val suggestion = when {
             response.suggestion?.canHu == true -> "可以和牌"
-            response.handTiles.size == 14 -> {
+            effectiveTileCount == 14 -> {
                 val discard = response.suggestion?.suggestion?.tile.orEmpty()
                 buildString {
                     append("建议打出：")
@@ -207,7 +212,7 @@ internal object DefaultMahjongFieldMapper : MahjongFieldMapper {
                     }
                 }
             }
-            response.handTiles.size == 13 -> {
+            effectiveTileCount == 13 -> {
                 if (incomingTiles.isEmpty()) "等待进张建议"
                 else "建议进张：${incomingTiles.joinToString(" ", transform = ::parseTile)}"
             }
@@ -219,6 +224,7 @@ internal object DefaultMahjongFieldMapper : MahjongFieldMapper {
             suggestedPlay = suggestion,
             suggestedDiscard = response.suggestion?.takeIf { it.adviceType == "discard" }
                 ?.suggestion?.tile?.takeIf(String::isNotBlank)?.let(::parseTile),
+            canHu = response.suggestion?.canHu == true,
             jinzhangTiles = incomingTiles.take(5).map(::parseTile),
             pengTiles = response.handTiles.groupingBy { it }.eachCount()
                 .filterValues { it >= 2 }.keys.map(::parseTile),

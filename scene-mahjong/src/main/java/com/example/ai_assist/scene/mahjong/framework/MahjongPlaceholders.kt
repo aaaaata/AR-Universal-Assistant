@@ -30,12 +30,13 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
-/** 麻将 HUD 使用的三字段结果。类型信息以后再填。 */
+/** 麻将 HUD 使用的场景结果。 */
 data class MahjongScenePayload(
     val userHand: List<String>,
     val meldedTiles: List<String>,
     val suggestedPlay: String,
     val suggestedDiscard: String? = null,
+    val canHu: Boolean = false,
     val jinzhangTiles: List<String> = emptyList(),
     val pengTiles: List<String> = emptyList(),
     val gangTiles: List<String> = emptyList(),

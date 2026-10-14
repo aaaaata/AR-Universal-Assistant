@@ -340,16 +340,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
     }
 
     private fun showMessage(message: String) {
-        mBindingPair.updateView {
-            tvCustomToast.text = message
-            tvCustomToast.visibility = View.VISIBLE
-            tvCustomToast.removeCallbacks(hideMessage)
-            tvCustomToast.postDelayed(hideMessage, 2_000L)
-        }
-    }
-
-    private val hideMessage = Runnable {
-        mBindingPair.updateView { tvCustomToast.visibility = View.GONE }
+        Log.w(TAG, message)
     }
 
     private fun TempleAction.toFrameworkAction(): InputAction? = when (this) {

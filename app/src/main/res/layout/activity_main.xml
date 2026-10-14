@@ -93,19 +93,4 @@
             android:visibility="gone" />
     </FrameLayout>
 
-    <TextView
-        android:id="@+id/tv_custom_toast"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_marginEnd="32dp"
-        android:layout_marginBottom="20dp"
-        android:background="@drawable/bg_capsule_border_blue"
-        android:elevation="20dp"
-        android:paddingHorizontal="12dp"
-        android:paddingVertical="6dp"
-        android:textColor="@color/bright_blue"
-        android:textSize="14sp"
-        android:visibility="gone"
-        tools:text="Toast Message" />
 </FrameLayout>

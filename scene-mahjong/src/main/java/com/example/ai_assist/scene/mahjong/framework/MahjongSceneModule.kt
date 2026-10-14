@@ -11,7 +11,7 @@ class MahjongSceneModule : SceneModule {
         provider = MahjongSceneProvider(),
         presentation = ScenePresentation(
             menuTitle = "AR麻将助手",
-            menuIconRes = R.drawable.ic_scene_mahjong
+            menuIconRes = R.drawable.ic_scene_mahjong_app
         )
     )
 }

@@ -92,7 +92,7 @@ class MahjongHudView @JvmOverloads constructor(
         payload.userHand.forEachIndexed { index, tile ->
             drawTile(canvas, HAND_LEFT + index * TILE_STEP, 32f, tile)
         }
-        if (payload.userHand.size == 14) {
+        if (!payload.canHu) {
             val discardIndex = payload.suggestedDiscard?.let(payload.userHand::indexOf) ?: -1
             if (discardIndex >= 0) {
                 val strengthColor = if (
@@ -126,26 +126,30 @@ class MahjongHudView @JvmOverloads constructor(
         drawDivider(canvas, 17f, ADVICE_DIVIDER_Y, 157f)
         drawDivider(canvas, 219f, ADVICE_DIVIDER_Y, 360f)
         drawText(canvas, "操作建议", 188f, 86f, 10f, green, Paint.Align.CENTER)
-        drawText(
-            canvas,
-            "向听数：${payload.shanten?.toString() ?: "-"}",
-            360f,
-            104f,
-            11f,
-            green,
-            Paint.Align.RIGHT
-        )
-        drawVerticalLabel(canvas, "进张", 17f, 106f)
-        payload.jinzhangTiles.take(5).forEachIndexed { index, tile ->
-            drawTile(canvas, 29f + index * 22f, 94f, tile)
-        }
-        drawVerticalLabel(canvas, "可碰", 17f, 133f)
-        payload.pengTiles.forEachIndexed { index, tile ->
-            drawTile(canvas, 29f + index * 22f, 121f, tile)
-        }
-        drawVerticalLabel(canvas, "可杠", 17f, 160f)
-        payload.gangTiles.forEachIndexed { index, tile ->
-            drawTile(canvas, 29f + index * 22f, 148f, tile)
+        if (payload.canHu) {
+            drawText(canvas, "可胡牌", 188f, 128f, 20f, green, Paint.Align.CENTER)
+        } else {
+            drawText(
+                canvas,
+                "向听数：${payload.shanten?.toString() ?: "-"}",
+                360f,
+                104f,
+                11f,
+                green,
+                Paint.Align.RIGHT
+            )
+            drawVerticalLabel(canvas, "进张", 17f, 106f)
+            payload.jinzhangTiles.take(5).forEachIndexed { index, tile ->
+                drawTile(canvas, 29f + index * 22f, 94f, tile)
+            }
+            drawVerticalLabel(canvas, "可碰", 17f, 133f)
+            payload.pengTiles.forEachIndexed { index, tile ->
+                drawTile(canvas, 29f + index * 22f, 121f, tile)
+            }
+            drawVerticalLabel(canvas, "可杠", 17f, 160f)
+            payload.gangTiles.forEachIndexed { index, tile ->
+                drawTile(canvas, 29f + index * 22f, 148f, tile)
+            }
         }
 
         val service = if (payload.serviceMode == MahjongServiceMode.LOCAL) "本地" else "云端"

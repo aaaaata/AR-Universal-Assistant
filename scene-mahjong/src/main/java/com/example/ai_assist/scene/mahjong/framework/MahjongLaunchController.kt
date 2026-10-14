@@ -1,7 +1,6 @@
 package com.example.ai_assist.scene.mahjong.framework
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -37,7 +36,6 @@ internal class MahjongLaunchController : SceneLaunchController {
             get() = root.findViewById(R.id.mahjong_barcode_scanner)
     }
 
-    private lateinit var activity: Activity
     private lateinit var configStore: MahjongConnectionConfigStore
     private val mountedViews = mutableListOf<MountedView>()
     private val readinessProbe = MahjongServiceReadinessProbe()
@@ -51,7 +49,9 @@ internal class MahjongLaunchController : SceneLaunchController {
     private var pendingConnection: MahjongConnectionConfig? = null
     private var selectedServiceMode = MahjongServiceMode.LOCAL
     private var pendingSave = false
+    private var warnOnConnectionFailure = false
     private var scanHandled = false
+    private var warningMessage: String? = null
 
     override fun attach(
         activity: Activity,
@@ -59,7 +59,6 @@ internal class MahjongLaunchController : SceneLaunchController {
         onStart: (SceneConfig) -> Unit,
         onExit: () -> Unit
     ) {
-        this.activity = activity
         this.onStart = onStart
         this.onExit = onExit
         if (!::configStore.isInitialized) {
@@ -80,9 +79,21 @@ internal class MahjongLaunchController : SceneLaunchController {
     }
 
     override fun onInput(action: InputAction) {
+        if (warningMessage != null) {
+            if (action == InputAction.CLICK || action == InputAction.DOUBLE_CLICK) {
+                dismissWarning()
+            }
+            return
+        }
         when (action) {
-            InputAction.SLIDE_FORWARD, InputAction.SLIDE_DOWN -> moveFocus(1)
-            InputAction.SLIDE_BACKWARD, InputAction.SLIDE_UP -> moveFocus(-1)
+            InputAction.SLIDE_FORWARD -> moveFocus(
+                if (page == Page.LOCAL_CONFIG) -1 else 1
+            )
+            InputAction.SLIDE_BACKWARD -> moveFocus(
+                if (page == Page.LOCAL_CONFIG) 1 else -1
+            )
+            InputAction.SLIDE_DOWN -> if (page != Page.LOCAL_CONFIG) moveFocus(1)
+            InputAction.SLIDE_UP -> if (page != Page.LOCAL_CONFIG) moveFocus(-1)
             InputAction.CLICK -> activateFocused()
             InputAction.DOUBLE_CLICK -> navigateBack()
             InputAction.TRIPLE_CLICK, InputAction.LONG_PRESS -> Unit
@@ -119,6 +130,9 @@ internal class MahjongLaunchController : SceneLaunchController {
         root.findViewById<Button>(R.id.mahjong_mode_record).setOnClickListener {
             startScene(MahjongRecordingMode.RECORD)
         }
+        root.findViewById<Button>(R.id.mahjong_warning_ok).setOnClickListener {
+            dismissWarning()
+        }
     }
 
     private fun showPage(target: Page) {
@@ -142,9 +156,12 @@ internal class MahjongLaunchController : SceneLaunchController {
             if (target == Page.CLOUD) View.VISIBLE else View.GONE
         root.findViewById<View>(R.id.mahjong_mode_page).visibility =
             if (target == Page.GAME_MODE) View.VISIBLE else View.GONE
+        renderWarning(root)
     }
 
-    private fun focusableButtons(root: View): List<Button> = when (page) {
+    private fun focusableButtons(root: View): List<Button> = if (warningMessage != null) {
+        listOf(root.findViewById(R.id.mahjong_warning_ok))
+    } else when (page) {
         Page.SERVICE -> listOf(
             root.findViewById(R.id.mahjong_service_local),
             root.findViewById(R.id.mahjong_service_cloud)
@@ -247,6 +264,7 @@ internal class MahjongLaunchController : SceneLaunchController {
     private fun validateLocal(connection: MahjongConnectionConfig, saveAfterSuccess: Boolean) {
         selectedServiceMode = MahjongServiceMode.LOCAL
         pendingSave = saveAfterSuccess
+        warnOnConnectionFailure = !saveAfterSuccess
         showConnectionStatus("正在校验本地服务...", connection.serverUrl)
         validateConnection(connection)
     }
@@ -254,6 +272,7 @@ internal class MahjongLaunchController : SceneLaunchController {
     private fun connectCloud() {
         selectedServiceMode = MahjongServiceMode.CLOUD
         pendingSave = false
+        warnOnConnectionFailure = false
         val connection = MahjongConnectionConfig(
             serverUrl = BuildConfig.MAHJONG_CLOUD_SERVER_BASE_URL,
             fps = 1,
@@ -283,6 +302,9 @@ internal class MahjongLaunchController : SceneLaunchController {
                 mountedViews.forEach {
                     it.root.findViewById<TextView>(R.id.mahjong_cloud_status).text =
                         "服务不可用，请检查服务和网络后重试"
+                }
+                if (warnOnConnectionFailure) {
+                    showWarning("保存配置连接失败，请检查服务和网络后重试")
                 }
             }
         }
@@ -315,9 +337,25 @@ internal class MahjongLaunchController : SceneLaunchController {
     }
 
     private fun showWarning(message: String) {
-        AlertDialog.Builder(activity)
-            .setMessage(message)
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
+        warningMessage = message
+        focusIndex = 0
+        mountedViews.forEach(::renderWarning)
+        renderFocus()
+    }
+
+    private fun dismissWarning() {
+        warningMessage = null
+        focusIndex = 0
+        mountedViews.forEach(::renderWarning)
+        renderFocus()
+    }
+
+    private fun renderWarning(mountedView: MountedView) = renderWarning(mountedView.root)
+
+    private fun renderWarning(root: View) {
+        val message = warningMessage
+        root.findViewById<View>(R.id.mahjong_warning_overlay).visibility =
+            if (message == null) View.GONE else View.VISIBLE
+        root.findViewById<TextView>(R.id.mahjong_warning_message).text = message.orEmpty()
     }
 }
