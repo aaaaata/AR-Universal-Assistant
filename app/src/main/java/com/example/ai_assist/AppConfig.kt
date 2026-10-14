@@ -1,8 +1,7 @@
 package com.example.ai_assist
 
 object AppConfig {
-    const val SERVER_BASE_URL = "http://192.168.2.195:8000/"
-    val CLOUD_SERVER_BASE_URL: String = BuildConfig.CLOUD_SERVER_BASE_URL
+    val SERVER_BASE_URL: String = BuildConfig.CLOUD_SERVER_BASE_URL
     const val PREFS_NAME = "ai_assist_prefs"
     const val KEY_CONNECTION_CONFIG = "connection_config_json"
     const val DEFAULT_CAPTURE_FPS = 1

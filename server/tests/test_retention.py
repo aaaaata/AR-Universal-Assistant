@@ -105,7 +105,7 @@ def test_storage_state_reports_recordings_and_export_temps_separately(settings: 
     (recording_dir / "session-1" / "frames" / "000001.png").write_bytes(b"r" * 11)
     configured = replace(
         settings,
-        database_path=tmp_path / "cloud.db",
+        database_path=tmp_path / "server.db",
         debug_image_dir=debug_dir,
         evidence_dir=evidence_dir,
         session_recording_dir=recording_dir,
@@ -129,7 +129,7 @@ def test_recording_preflight_allows_exact_min_free_boundary(
 ):
     configured = replace(
         settings,
-        database_path=tmp_path / "cloud.db",
+        database_path=tmp_path / "server.db",
         debug_image_dir=tmp_path / "debug",
         evidence_dir=tmp_path / "evidence",
         session_recording_dir=tmp_path / "recordings",
@@ -149,7 +149,7 @@ def test_recording_preflight_rejects_without_false_reservation(
 ):
     configured = replace(
         settings,
-        database_path=tmp_path / "cloud.db",
+        database_path=tmp_path / "server.db",
         debug_image_dir=tmp_path / "debug",
         evidence_dir=tmp_path / "evidence",
         session_recording_dir=tmp_path / "recordings",
@@ -175,7 +175,7 @@ def test_recording_preflight_stops_after_purge_makes_no_progress(
 ):
     configured = replace(
         settings,
-        database_path=tmp_path / "cloud.db",
+        database_path=tmp_path / "server.db",
         debug_image_dir=tmp_path / "debug",
         session_recording_dir=tmp_path / "recordings",
         storage_min_free_bytes=100,
@@ -209,7 +209,7 @@ def test_recording_budget_is_not_blocked_by_ordinary_storage_limit(
     gib = 1024 * 1024 * 1024
     configured = replace(
         settings,
-        database_path=tmp_path / "cloud.db",
+        database_path=tmp_path / "server.db",
         debug_image_dir=tmp_path / "debug",
         session_recording_dir=tmp_path / "recordings",
         storage_max_bytes=6 * gib,

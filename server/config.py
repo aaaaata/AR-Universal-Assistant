@@ -142,11 +142,9 @@ class Settings:
             raise ValueError("CLOUD_DEBUG_IMAGE_MODE must be one of: always, sampled, diagnostic, off")
         return cls(
             api_key=os.getenv("CLOUD_API_KEY", ""),
-            database_path=Path(os.getenv("CLOUD_DATABASE_PATH", str(repo_root / "server" / "data" / "cloud.db"))),
+            database_path=Path(os.getenv("CLOUD_DATABASE_PATH", str(repo_root / "server" / "data" / "server.db"))),
             tile_manifest_path=Path(os.getenv("CLOUD_TILE_MANIFEST", str(repo_root / "server" / "models" / "tile.manifest.json"))),
-            region_manifest_path=Path(
-                os.getenv("CLOUD_REGION_MANIFEST", str(repo_root / "server" / "models" / "region.manifest.json"))
-            ),
+            region_manifest_path=(Path(os.environ["CLOUD_REGION_MANIFEST"]) if os.getenv("CLOUD_REGION_MANIFEST") else None),
             debug_image_dir=debug_image_dir,
             dev_full_image_hand_region=os.getenv("CLOUD_DEV_FULL_IMAGE_HAND_REGION", "").lower() in {"1", "true", "yes", "on"},
             max_upload_bytes=_int_from_env("CLOUD_MAX_UPLOAD_BYTES", 10 * 1024 * 1024),

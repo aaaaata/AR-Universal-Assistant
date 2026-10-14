@@ -3,18 +3,11 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+fun gradleProperty(name: String, fallback: String): String =
+    providers.gradleProperty(name).orNull?.trim()?.takeIf(String::isNotEmpty) ?: fallback
+
 fun String.asBuildConfigString(): String =
     "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
-
-val cloudServerBaseUrl = providers.gradleProperty("CLOUD_SERVER_BASE_URL")
-    .orElse(providers.gradleProperty("CLOUD_BASE_URL"))
-    .getOrElse("http://39.96.67.192:8552/")
-require(cloudServerBaseUrl.endsWith('/')) {
-    "CLOUD_SERVER_BASE_URL must end with '/': $cloudServerBaseUrl"
-}
-val assistApiKey = providers.gradleProperty("ASSIST_API_KEY").orElse("local-token")
-val localApiKey = providers.gradleProperty("LOCAL_API_KEY").orElse("local-token")
-val cloudApiKey = providers.gradleProperty("CLOUD_API_KEY").orElse(assistApiKey)
 
 android {
     namespace = "com.example.ai_assist"
@@ -28,7 +21,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.ai_assist.cloudmigration"
+        applicationId = "com.example.ai_assist.refactor"
         minSdk = 31
         targetSdk = 36
         versionCode = 1
@@ -37,10 +30,19 @@ android {
         buildConfigField(
             "String",
             "CLOUD_SERVER_BASE_URL",
-            cloudServerBaseUrl.asBuildConfigString()
+            gradleProperty("CLOUD_SERVER_BASE_URL", "http://39.96.67.192:8552/")
+                .asBuildConfigString()
         )
-        buildConfigField("String", "LOCAL_API_KEY", localApiKey.get().asBuildConfigString())
-        buildConfigField("String", "CLOUD_API_KEY", cloudApiKey.get().asBuildConfigString())
+        buildConfigField(
+            "String",
+            "CLOUD_API_KEY",
+            gradleProperty("CLOUD_API_KEY", "local-token").asBuildConfigString()
+        )
+        buildConfigField(
+            "String",
+            "LOCAL_API_KEY",
+            gradleProperty("LOCAL_API_KEY", "local-token").asBuildConfigString()
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -73,7 +75,7 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
-    // 引入 libs 目录下的所有 aar 文件
+    // 引入 libs 目录下的所�?aar 文件
     implementation(fileTree("libs"))
 
     // 引入rayneo文档要求的其他必要依赖项 [cite: 12]
@@ -91,9 +93,6 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.11.0")
-    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
-    implementation("com.google.zxing:core:3.5.3")
-
     // Lifecycle
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.1")

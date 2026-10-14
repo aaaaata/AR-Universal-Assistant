@@ -8,7 +8,7 @@ from server.storage import SQLiteStore
 
 
 def test_initialize_adds_frame_ts_to_legacy_analysis_table(tmp_path):
-    database_path = tmp_path / "legacy-cloud.db"
+    database_path = tmp_path / "legacy-server.db"
     with sqlite3.connect(database_path) as connection:
         connection.executescript(
             """
@@ -120,7 +120,7 @@ def test_initialize_adds_recording_tables_without_changing_legacy_rows(tmp_path)
 
 
 def test_every_store_connection_enforces_foreign_keys(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
 
     with store._connection() as connection:
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1

@@ -17,7 +17,7 @@ from server.storage import SQLiteStore
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         api_key="test-key",
-        database_path=tmp_path / "cloud.db",
+        database_path=tmp_path / "server.db",
         tile_manifest_path=tmp_path / "tile.manifest.json",
         region_manifest_path=tmp_path / "region.manifest.json",
         min_image_width=32,

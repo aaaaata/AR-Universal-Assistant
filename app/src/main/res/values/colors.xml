@@ -5,8 +5,8 @@
     <color name="neon_green">#44FF66</color>
     <color name="neon_green_dim">#228833</color>
     <color name="bright_blue">#00BFFF</color>
-    <color name="red">#FF0000</color>
-    <color name="transparent">#00000000</color>
     <color name="launcher_focus">#28D7FF</color>
     <color name="launcher_focus_dim">#16566A</color>
+    <color name="red">#FF0000</color>
+    <color name="transparent">#00000000</color>
 </resources>

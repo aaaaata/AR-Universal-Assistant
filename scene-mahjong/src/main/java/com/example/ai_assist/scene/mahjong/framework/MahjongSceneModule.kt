@@ -5,13 +5,13 @@ import com.example.ai_assist.sdk.framework.SceneModule
 import com.example.ai_assist.sdk.framework.ScenePresentation
 import com.example.ai_assist.sdk.framework.SceneRegistration
 
-/** 麻将模块自己的安装入口；通用宿主无需认识麻将实现类。 */
+/** 麻将模块安装入口；App 只读取通用注册信息。 */
 class MahjongSceneModule : SceneModule {
     override fun createRegistration(): SceneRegistration = SceneRegistration(
         provider = MahjongSceneProvider(),
         presentation = ScenePresentation(
             menuTitle = "AR麻将助手",
-            menuIconRes = R.drawable.ic_scene_mahjong_app
+            menuIconRes = R.drawable.ic_scene_mahjong
         )
     )
 }

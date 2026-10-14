@@ -1,6 +1,6 @@
 # AR 麻将助手 Cloud 服务
 
-`server/` 是当前 AR 麻将助手的服务端主链路：接收一张 PNG/JPEG 原始图片，检测手牌/副露区域，识别牌面，按广东 MVP 规则生成 13 张摸牌建议或 14 张出牌建议，并返回可诊断的结果与耗时。
+`cloud/` 是当前 AR 麻将助手的服务端主链路：接收一张 PNG/JPEG 原始图片，检测手牌/副露区域，识别牌面，按广东 MVP 规则生成 13 张摸牌建议或 14 张出牌建议，并返回可诊断的结果与耗时。
 
 本仓库不包含客户端实现。Android/RayNeo 客户端在 [armahjongassist](https://gitlab.rayneo.com/CAI/armahjongassist) 仓库维护；双方以 [HTTP 契约](../docs/cc/ar-mahjong-cloud--mvp1/contracts.md) 联调。
 
@@ -21,8 +21,8 @@
 
 | 作用 | Manifest | 默认 runtime | 模型路径 |
 |---|---|---|---|
-| 手牌/副露区域 | `server/models/region.manifest.json` | Ultralytics（CPU 推理配置） | `models/region/yolo26_hand_detect.pt` |
-| 麻将牌面 | `server/models/tile.manifest.json` | Ultralytics（CPU 推理配置） | `models/tile/yolo26m_mahjong_detect_finetune.pt` |
+| 手牌/副露区域 | `cloud/models/region.manifest.json` | Ultralytics（CPU 推理配置） | `models/region/yolo26_hand_detect.pt` |
+| 麻将牌面 | `cloud/models/tile.manifest.json` | Ultralytics（CPU 推理配置） | `models/tile/yolo26m_mahjong_detect_finetune.pt` |
 
 服务端不额外按区域置信度过滤检测框；模型原始置信度会进入后续置信度计算。未设置 `conf`/`iou` 时，由 Ultralytics 使用其默认推理阈值。
 
@@ -30,30 +30,31 @@
 
 ### 1. 安装依赖
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r server\requirements.txt
+```bash
+python -m pip install -r cloud/requirements.txt
 ```
 
 ### 2. 配置
 
 可直接使用脚本默认值。仅在需要覆盖端口、API Key、模型 manifest 或图片限制时，才创建本地配置：
 
-```powershell
-Copy-Item server\.env.example server\.env.local
+```bash
+cp cloud/.env.example cloud/.env.local
 ```
 
-`.env.local` 仅在当前机器生效，且不会提交到 Git；`server/.env.example` 使用宿主机相对路径，不能用于 Docker/流水线容器。`CLOUD_MAX_IMAGE_PIXELS=0` 只用于原图性能实验，不是常规运行默认值。GPU 实验复用相同模型权重，但需要在 manifest 中显式指定 GPU 设备，并使用具备 CUDA 运行时的环境。
+`.env.local` 仅在当前机器生效，且不会提交到 Git；`cloud/.env.example` 使用宿主机相对路径，不能用于 Docker/流水线容器。`CLOUD_MAX_IMAGE_PIXELS=0` 只用于原图性能实验，不是常规运行默认值。GPU 实验复用相同模型权重，但需要在 manifest 中显式指定 GPU 设备，并使用具备 CUDA 运行时的环境。
 
 运行环境仅支持 `CLOUD_RUNTIME_ENV=local|test`，其他值会拒绝启动。`local` 默认全量保存成功帧，适合短期联调；公网测试服必须显式使用 `test`，默认每个会话每 30 秒最多保存 1 张成功帧。两种 Profile 的留存、容量与异常取证规则见[运行数据留存与异常取证](../docs/deployment/cloud-data-retention-and-forensics.md)。
 
-### 3. 本地启动
+### 3. 启动与停止
 
-```powershell
-.\.venv\Scripts\python.exe -m server.run_local
+```bash
+./scripts/start-cloud.sh
+./scripts/check-cloud.sh
+./scripts/stop-cloud.sh
 ```
 
-本地入口监听 `0.0.0.0:8000`，使用一个 Uvicorn worker，并在终端输出局域网二维码页面地址。
+未覆盖环境变量时，脚本监听 `0.0.0.0:8000`、启动 3 个 Uvicorn worker。每个 worker 的 `CLOUD_ANALYSIS_CONCURRENCY` 默认是 1；总承载应按部署 CPU、内存、模型和实际压测确定，不能由 worker 数直接推导。
 
 
 健康检查不需要 API key：
@@ -75,14 +76,14 @@ docker compose up
 如需给本地 Docker 覆盖 API Key 或其他容器配置：
 
 ```bash
-cp server/.env.container.example server/.env.container.local
+cp cloud/.env.container.example cloud/.env.container.local
 ```
 
 `.env.container.local` 使用容器内 `/app/...` 路径，只供 Docker Compose 读取；流水线应通过平台环境变量与 secret 注入配置。
 
-当前流水线属于公网测试服，必须注入 `CLOUD_RUNTIME_ENV=test`；不要使用本地 Profile 或将 `server/.env.local` 复制到容器。
+当前流水线属于公网测试服，必须注入 `CLOUD_RUNTIME_ENV=test`；不要使用本地 Profile 或将 `cloud/.env.local` 复制到容器。
 
-容器监听 `8080`，当前模型权重临时随镜像 COPY，并默认使用 CPU 推理 manifest。GPU 推理复用相同权重，但需要 CUDA 运行时、GPU 资源和显式 GPU manifest。根目录 `docker-compose.yml` 只挂载 `server/data`，不会以空的宿主机 `models/` 覆盖镜像模型。公网测试服硬必填：
+容器监听 `8080`，当前模型权重临时随镜像 COPY，并默认使用 CPU 推理 manifest。GPU 推理复用相同权重，但需要 CUDA 运行时、GPU 资源和显式 GPU manifest。根目录 `docker-compose.yml` 只挂载 `cloud/data`，不会以空的宿主机 `models/` 覆盖镜像模型。公网测试服硬必填：
 
 ```env
 CLOUD_API_KEY=<由 secret 管理的随机值>
@@ -153,7 +154,7 @@ GET  /debug/evidence/{evidence_id}/download
 `CLOUD_RUNTIME_ENV=test` 且 `CLOUD_SESSION_RECORDING_ENABLED=1` 时开放。默认同时只允许
 一个活跃录制，每个会话最多 8 GiB，结束后保留 1 天，原始帧写入
 `CLOUD_SESSION_RECORDING_DIR/<session_id>/frames/`。本地模板使用
-`server/data/session_recordings`；容器应使用容器内路径或数据卷。
+`cloud/data/session_recordings`；容器应使用容器内路径或数据卷。
 
 创建回归会话会先检查完整 8 GiB 预算和最小剩余空间；需要腾挪时先清理普通调试图，
 有效 hold 内的冻结 evidence 受保护。录制只有在非空、全部 analysis 完成且帧索引完整
@@ -191,7 +192,7 @@ CLI 的语义差异字段、仅报告字段和退出码同样以契约为准。�
 ## 测试
 
 ```bash
-PYTHONPATH=. python -m pytest -q server/tests
+PYTHONPATH=. python -m pytest -q cloud/tests
 
 python tools/test_cloud_analysis_request.py \
   --base-url http://127.0.0.1:8000 \

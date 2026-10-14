@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     YOLO_CONFIG_DIR=/tmp/Ultralytics \
     CLOUD_HOST=0.0.0.0 \
     CLOUD_PORT=8080 \
-    CLOUD_WORKERS=3 \
+    CLOUD_WORKERS=1 \
     CLOUD_REGION_MANIFEST=/app/server/models/region.manifest.json \
     CLOUD_TILE_MANIFEST=/app/server/models/tile.manifest.json
 
@@ -31,4 +31,4 @@ COPY models/tile/yolo26m_mahjong_detect_finetune.pt /app/models/tile/yolo26m_mah
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn server.app:app --host ${CLOUD_HOST:-0.0.0.0} --port ${CLOUD_PORT:-8080} --workers ${CLOUD_WORKERS:-3}"]
+CMD ["sh", "-c", "uvicorn server.app:app --host ${CLOUD_HOST:-0.0.0.0} --port ${CLOUD_PORT:-8080} --workers ${CLOUD_WORKERS:-1}"]

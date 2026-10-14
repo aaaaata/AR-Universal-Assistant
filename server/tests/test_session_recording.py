@@ -58,7 +58,7 @@ def _regression_session(store: SQLiteStore) -> str:
 
 
 def test_recording_modes_and_single_active_limit(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
     normal = store.create_session("guangdong_mvp_v1")
     regression = _regression_session(store)
 
@@ -84,7 +84,7 @@ def test_regression_mode_is_test_only_and_can_be_disabled(service):
 
 
 def test_end_and_finalize_completed_recording_atomically(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
     session_id = _regression_session(store)
     analysis_id = _start_analysis(store, session_id, "request-1", 1)
     _record_frame(store, session_id, analysis_id, "request-1", 1, tmp_path / "frame.png")
@@ -105,7 +105,7 @@ def test_end_and_finalize_completed_recording_atomically(tmp_path):
 
 
 def test_end_and_finalize_roll_back_together_on_recording_update_failure(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
     session_id = _regression_session(store)
     with store._connection() as connection:
         connection.execute(
@@ -162,7 +162,7 @@ def test_end_race_and_invalid_contents_are_incomplete(tmp_path, setup, reason):
 
 
 def test_completed_pack_has_frame_and_analysis_metadata(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
     session_id = _regression_session(store)
     analysis_id = _start_analysis(store, session_id, "request-1", 1)
     frame_path = tmp_path / "frame.png"
@@ -197,7 +197,7 @@ def test_completed_pack_has_frame_and_analysis_metadata(tmp_path):
 
 
 def test_empty_or_incomplete_recording_cannot_be_exported(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
     session_id = _regression_session(store)
     store.end_session_and_finalize_recording(session_id, 1)
 
@@ -349,7 +349,7 @@ def test_recording_frame_allows_exact_minimum_free_space_boundary(
 
 
 def test_completed_recording_protects_analysis_from_ordinary_retention(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
     session_id = _regression_session(store)
     analysis_id = _start_analysis(store, session_id, "request-1", 1)
     _record_frame(store, session_id, analysis_id, "request-1", 1, tmp_path / "frame.png")
@@ -361,7 +361,7 @@ def test_completed_recording_protects_analysis_from_ordinary_retention(tmp_path)
 
 
 def test_expired_tombstone_preserves_recording_and_clears_frame_index(tmp_path):
-    store = SQLiteStore(tmp_path / "cloud.db")
+    store = SQLiteStore(tmp_path / "server.db")
     session_id = _regression_session(store)
     analysis_id = _start_analysis(store, session_id, "request-1", 1)
     _record_frame(store, session_id, analysis_id, "request-1", 1, tmp_path / "frame.png")

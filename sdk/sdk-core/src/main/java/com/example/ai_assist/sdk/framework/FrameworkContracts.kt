@@ -1,5 +1,6 @@
 package com.example.ai_assist.sdk.framework
 
+import android.app.Activity
 import android.view.ViewGroup
 import java.io.File
 import kotlinx.coroutines.flow.Flow
@@ -25,41 +26,19 @@ enum class CapabilityType {
 /** SDK 全局配置占位。日志、缓存和默认超时以后在这里填。 */
 interface SdkConfig
 
-/** 场景配置占位。服务地址、采集频率和业务参数由场景定义。 */
-interface SceneConfig
-
-/** 宿主完成连接配置后传给场景的通用参数。 */
-data class SceneConnection(
-    val serverBaseUrl: String,
-    val serviceModeId: String,
-    val captureIntervalMillis: Long
-)
-
-/** 场景启动前的一项业务选择。宿主只展示，不解释 ID 的业务含义。 */
-data class SceneStartMode(
-    val id: String,
-    val label: String
-) {
-    init {
-        require(id.isNotBlank()) { "start mode ID must not be blank" }
-        require(label.isNotBlank()) { "start mode label must not be blank" }
-    }
+/** 场景配置。业务字段由场景定义，Core 只读取可选凭据标识。 */
+interface SceneConfig {
+    val credentialId: String?
+        get() = null
 }
 
-/** 按场景提供敏感凭据。凭据不得进入普通配置或日志。 */
+/** 按不透明标识提供敏感凭据；真实凭据不得进入普通配置或日志。 */
 fun interface CredentialProvider {
-    fun credentialFor(sceneId: String): String?
+    fun credentialFor(sceneId: String, credentialId: String): String?
 }
 
 /** 硬件能力配置占位。图像尺寸、格式和相机参数以后在这里填。 */
 interface CapabilityConfig
-
-/** CameraScheduler 可读取的通用图像采集参数。 */
-interface ImageCaptureConfig : CapabilityConfig {
-    val preferredWidth: Int
-    val preferredHeight: Int
-    val imageFormat: String
-}
 
 /** 镜腿或触控产生的输入动作。 */
 enum class InputAction {
@@ -80,8 +59,7 @@ enum class InputAction {
 data class Frame(
     val file: File,
     val imageRotationDegrees: Int,
-    val capturedAtMillis: Long,
-    val medianLuma: Int? = null
+    val capturedAtMillis: Long
 )
 
 /** Core 运行帧流所需的场景参数。 */
@@ -197,6 +175,9 @@ interface SceneContext {
     /** 当前会话的输入动作。没有输入能力时为空流。 */
     val inputActions: Flow<InputAction>
 
+    /** 场景请求 Core 停止当前会话；资源释放仍由 Core 完成。 */
+    fun requestStop()
+
     /** 单帧失败用 recoverable=true，会话保持 RUNNING。 */
     suspend fun reportError(code: String, message: String, recoverable: Boolean)
 
@@ -222,44 +203,47 @@ interface SceneProvider {
     fun createSession(sceneContext: SceneContext): Session
 }
 
-/** 可选启动配置的场景。未实现此接口的场景可直接使用默认配置启动。 */
+/** 有启动前页面的场景可选实现；没有启动页的场景直接使用默认配置启动。 */
 interface SceneLaunchProvider : SceneProvider {
-    /** 空集代表不需要经过宿主本地/云端连接流程。 */
-    val supportedConnectionSceneIds: Set<String>
-        get() = emptySet()
-
-    /** 空列表代表没有业务启动选项。 */
-    val startModes: List<SceneStartMode>
-        get() = emptyList()
-
-    /** 由场景解释 [connection] 和 [startModeId]，构造自己的私有配置。 */
-    fun createSceneConfig(connection: SceneConnection?, startModeId: String?): SceneConfig
+    fun createLaunchController(): SceneLaunchController
 }
 
-/** 场景在通用菜单中的展示信息。图标资源由场景模块提供。 */
+/**
+ * 场景私有启动流程的通用宿主入口，不包含连接、二维码或模式等业务字段。
+ * 双目宿主可为每只眼的容器分别调用 [attach]；实现必须保持各容器显示状态一致。
+ */
+interface SceneLaunchController {
+    fun attach(
+        activity: Activity,
+        container: ViewGroup,
+        onStart: (SceneConfig) -> Unit,
+        onExit: () -> Unit
+    )
+
+    fun onInput(action: InputAction)
+    fun close()
+}
+
+/** 场景在通用菜单中的展示信息；资源由场景模块提供。 */
 data class ScenePresentation(
     val menuTitle: String,
     val menuIconRes: Int
-) {
-    init {
-        require(menuTitle.isNotBlank()) { "menuTitle must not be blank" }
-        require(menuIconRes != 0) { "menuIconRes must be a valid resource ID" }
-    }
-}
+)
 
-/** 一个可安装场景对宿主暴露的完整注册信息。 */
+/** 一个可安装场景对宿主暴露的注册信息。 */
 data class SceneRegistration(
     val provider: SceneProvider,
     val presentation: ScenePresentation
 )
 
-/** 场景模块安装入口。宿主通过清单发现实现，不依赖具体场景类。 */
+/** 编译期安装场景的通用入口。 */
 fun interface SceneModule {
     fun createRegistration(): SceneRegistration
 }
 
 /** sdk-core 入口。场景通过它注册和启动。 */
 interface CvGameCore {
+    fun initialize()
     fun registerScene(provider: SceneProvider)
     fun unregisterScene(sceneId: String)
     fun getScenes(): List<SceneProvider>
@@ -289,7 +273,7 @@ interface SessionManager {
 /**
  * 状态机。
  * 合法转换：UNINITIALIZED->READY，READY->STARTING，
- * STARTING->RUNNING|ERROR，RUNNING->STOPPING|ERROR，
+ * STARTING->RUNNING|STOPPING|ERROR，RUNNING->STOPPING|ERROR，
  * STOPPING->READY，ERROR->READY。
  */
 interface StateMachine {

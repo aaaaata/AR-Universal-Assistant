@@ -10,18 +10,19 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** FrameworkContracts 中 StateMachine 的默认线程安全实现。 */
-class DefaultStateMachine(initialState: SdkState = SdkState.READY) : StateMachine {
+/** 线程安全状态机；状态转换只接受契约声明的路径。 */
+class DefaultStateMachine(initialState: SdkState = SdkState.UNINITIALIZED) : StateMachine {
     private val mutableState = MutableStateFlow(initialState)
     override val state: StateFlow<SdkState> = mutableState
 
@@ -39,7 +40,11 @@ class DefaultStateMachine(initialState: SdkState = SdkState.READY) : StateMachin
         val ALLOWED_TRANSITIONS = mapOf(
             SdkState.UNINITIALIZED to setOf(SdkState.READY),
             SdkState.READY to setOf(SdkState.STARTING),
-            SdkState.STARTING to setOf(SdkState.RUNNING, SdkState.ERROR),
+            SdkState.STARTING to setOf(
+                SdkState.RUNNING,
+                SdkState.STOPPING,
+                SdkState.ERROR
+            ),
             SdkState.RUNNING to setOf(SdkState.STOPPING, SdkState.ERROR),
             SdkState.STOPPING to setOf(SdkState.READY),
             SdkState.ERROR to setOf(SdkState.READY)
@@ -47,7 +52,7 @@ class DefaultStateMachine(initialState: SdkState = SdkState.READY) : StateMachin
     }
 }
 
-/** FrameworkContracts 中 EventDispatcher 的默认实现。 */
+/** 状态、结果、错误和诊断的统一事件出口。 */
 class DefaultEventDispatcher : EventDispatcher {
     private val mutableEvents = MutableSharedFlow<SdkEvent>(
         replay = EVENT_REPLAY,
@@ -72,15 +77,16 @@ class DefaultEventDispatcher : EventDispatcher {
     }
 }
 
-/** SceneProvider 可见的 SceneContext 默认实现。 */
+/** 当前场景会话可见的通用上下文。 */
 class DefaultSceneContext(
     override val sessionId: String,
-    val sceneId: String,
+    private val sceneId: String,
     override val config: SceneConfig,
     private val resourceManager: ResourceManager,
     private val credentialProvider: CredentialProvider,
     private val eventDispatcher: DefaultEventDispatcher,
-    override val inputActions: Flow<InputAction> = emptyFlow()
+    override val inputActions: Flow<InputAction>,
+    private val stopRequester: () -> Unit
 ) : SceneContext {
     private val fatalErrorReported = AtomicBoolean(false)
     private val leases = linkedMapOf<CapabilityType, CapabilityLease>()
@@ -89,7 +95,11 @@ class DefaultSceneContext(
     override fun requireCapability(type: CapabilityType): CapabilityLease =
         leases.getOrPut(type) { resourceManager.acquire(type, sceneId) }
 
-    override fun credential(): String? = credentialProvider.credentialFor(sceneId)
+    override fun credential(): String? = config.credentialId?.let { credentialId ->
+        credentialProvider.credentialFor(sceneId, credentialId)
+    }
+
+    override fun requestStop() = stopRequester()
 
     override suspend fun reportError(code: String, message: String, recoverable: Boolean) {
         if (!recoverable) fatalErrorReported.set(true)
@@ -126,7 +136,7 @@ class DefaultSceneContext(
     }
 }
 
-/** Core 独占 Frame Flow 的默认会话调度器。顺序 collect 自然提供单帧背压。 */
+/** Core 独占 Frame Flow；顺序 collect 自然保证上一帧处理完成后才采下一帧。 */
 class DefaultSessionManager(
     private val cameraScheduler: CameraScheduler
 ) : SessionManager {
@@ -163,24 +173,34 @@ class DefaultSessionManager(
     }
 }
 
-/**
- * 当前契约的最小可运行 Core。SessionManager 负责 Frame 流，场景 Session 负责单帧业务。
- */
-class DefaultCvGameCore(
+/** 默认 Core：SessionManager 管 Frame Flow，场景 Session 只处理单帧业务。 */
+class FrameworkRuntime(
     private val cameraScheduler: CameraScheduler,
-    private val resourceManager: ResourceManager,
-    private val credentialProvider: CredentialProvider = CredentialProvider { null },
-    private val inputActions: Flow<InputAction> = emptyFlow(),
+    private val credentialProvider: CredentialProvider = CredentialProvider { _, _ -> null },
+    private val resourceManager: ResourceManager = DefaultResourceManager {
+        (cameraScheduler as? AutoCloseable)?.close()
+    },
     private val stateMachine: DefaultStateMachine = DefaultStateMachine(),
     private val eventDispatcher: DefaultEventDispatcher = DefaultEventDispatcher(),
     private val sessionManager: SessionManager = DefaultSessionManager(cameraScheduler)
 ) : CvGameCore {
     private val providers = linkedMapOf<String, SceneProvider>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val inputActions = MutableSharedFlow<InputAction>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     private var activeScene: ActiveScene? = null
 
     val state: StateFlow<SdkState> = stateMachine.state
     val events: SharedFlow<SdkEvent> = eventDispatcher.events
+
+    @Synchronized
+    override fun initialize() {
+        if (stateMachine.state.value == SdkState.UNINITIALIZED) {
+            stateMachine.transition(SdkState.READY)
+        }
+    }
 
     @Synchronized
     override fun registerScene(provider: SceneProvider) {
@@ -215,7 +235,8 @@ class DefaultCvGameCore(
                 resourceManager = resourceManager,
                 credentialProvider = credentialProvider,
                 eventDispatcher = eventDispatcher,
-                inputActions = inputActions
+                inputActions = inputActions,
+                stopRequester = ::stopScene
             )
             transition(provider, sessionId, SdkState.STARTING)
             val active = ActiveScene(provider, sessionId)
@@ -230,14 +251,16 @@ class DefaultCvGameCore(
     override fun stopScene() {
         val active = synchronized(this) {
             activeScene?.also { scene ->
-                if (scene.stopping.compareAndSet(false, true) &&
-                    stateMachine.state.value == SdkState.RUNNING
-                ) {
-                    transition(scene.provider, scene.sessionId, SdkState.STOPPING)
+                if (scene.stopping.compareAndSet(false, true)) {
+                    when (stateMachine.state.value) {
+                        SdkState.STARTING, SdkState.RUNNING ->
+                            transition(scene.provider, scene.sessionId, SdkState.STOPPING)
+                        else -> Unit
+                    }
                 }
             }
         } ?: return
-        active.job?.cancel(CancellationException("Scene stopped by host"))
+        active.job?.cancel(CancellationException("Scene stopped"))
     }
 
     override fun getCurrentState(): SdkState = stateMachine.state.value
@@ -250,6 +273,11 @@ class DefaultCvGameCore(
                 stateMachine.transition(SdkState.READY)
             }
         }
+    }
+
+    /** App 将眼镜输入适配为公共动作后送入当前运行会话。 */
+    fun publishInput(action: InputAction) {
+        inputActions.tryEmit(action)
     }
 
     fun close() {
@@ -267,7 +295,12 @@ class DefaultCvGameCore(
                 session = session,
                 sceneContext = context,
                 onStarted = {
-                    transition(active.provider, active.sessionId, SdkState.RUNNING)
+                    synchronized(this) {
+                        if (stateMachine.state.value != SdkState.STARTING || active.stopping.get()) {
+                            throw CancellationException("Scene stopped during startup")
+                        }
+                        transition(active.provider, active.sessionId, SdkState.RUNNING)
+                    }
                 },
                 onResult = { result ->
                     eventDispatcher.dispatch(
@@ -282,7 +315,7 @@ class DefaultCvGameCore(
                 }
             )
         } catch (cancelled: CancellationException) {
-            if (!active.stopping.get()) throw cancelled
+            throw cancelled
         } catch (error: Throwable) {
             failed = true
             if (!context.hasFatalError()) {
@@ -300,15 +333,19 @@ class DefaultCvGameCore(
         } finally {
             withContext(NonCancellable) {
                 resourceManager.releaseAll()
-                synchronized(this@DefaultCvGameCore) {
+                synchronized(this@FrameworkRuntime) {
                     if (activeScene === active) activeScene = null
-                    if (!failed) {
-                        if (stateMachine.state.value == SdkState.RUNNING) {
+                    when (stateMachine.state.value) {
+                        SdkState.STARTING, SdkState.RUNNING -> {
                             transition(active.provider, active.sessionId, SdkState.STOPPING)
-                        }
-                        if (stateMachine.state.value == SdkState.STOPPING) {
                             transition(active.provider, active.sessionId, SdkState.READY)
                         }
+                        SdkState.STOPPING ->
+                            transition(active.provider, active.sessionId, SdkState.READY)
+                        SdkState.ERROR -> if (failed) {
+                            transition(active.provider, active.sessionId, SdkState.READY)
+                        }
+                        else -> Unit
                     }
                 }
             }
@@ -335,3 +372,26 @@ class DefaultCvGameCore(
         var job: Job? = null
     )
 }
+
+class DefaultResourceManager(
+    private val onReleaseAll: () -> Unit = {}
+) : ResourceManager {
+    private val owners = mutableMapOf<CapabilityType, String>()
+
+    override fun acquire(type: CapabilityType, sceneId: String): CapabilityLease = synchronized(owners) {
+        val owner = owners[type]
+        require(owner == null || owner == sceneId) { "$type is already owned by $owner" }
+        owners[type] = sceneId
+        RuntimeCapabilityLease(type, sceneId)
+    }
+
+    override fun releaseAll() {
+        synchronized(owners) { owners.clear() }
+        onReleaseAll()
+    }
+}
+
+private data class RuntimeCapabilityLease(
+    val type: CapabilityType,
+    val sceneId: String
+) : CapabilityLease

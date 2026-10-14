@@ -1,0 +1,241 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <FrameLayout
+        android:id="@+id/mahjong_service_page"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="28dp"
+            android:text="连接方式选择"
+            android:textColor="#44FF66"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="114dp"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/mahjong_service_local"
+                android:layout_width="118dp"
+                android:layout_height="114dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="本地服务"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp" />
+
+            <Space android:layout_width="52dp" android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/mahjong_service_cloud"
+                android:layout_width="118dp"
+                android:layout_height="114dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="云端服务"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/mahjong_local_page"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="24dp"
+            android:text="本地服务配置"
+            android:textColor="#44FF66"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="140dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <Button
+                android:id="@+id/mahjong_local_scan"
+                android:layout_width="140dp"
+                android:layout_height="54dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="扫码连接"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+
+            <Space android:layout_width="1dp" android:layout_height="10dp" />
+
+            <Button
+                android:id="@+id/mahjong_local_saved"
+                android:layout_width="140dp"
+                android:layout_height="54dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="使用保存配置"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <Space android:layout_width="1dp" android:layout_height="10dp" />
+
+            <Button
+                android:id="@+id/mahjong_local_clear"
+                android:layout_width="140dp"
+                android:layout_height="54dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="清除配置"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/mahjong_qr_page"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="14dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/mahjong_qr_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="扫码连接本地服务"
+            android:textColor="#44FF66"
+            android:textSize="20sp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <com.journeyapps.barcodescanner.DecoratedBarcodeView
+            android:id="@+id/mahjong_barcode_scanner"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_marginTop="10dp"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/bg_mahjong_launch_border"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/mahjong_qr_title"
+            app:zxing_framing_rect_height="130dp"
+            app:zxing_framing_rect_width="200dp"
+            app:zxing_preview_scaling_strategy="centerCrop" />
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <FrameLayout
+        android:id="@+id/mahjong_cloud_page"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="28dp"
+            android:text="服务连接"
+            android:textColor="#44FF66"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:paddingHorizontal="28dp">
+
+            <TextView
+                android:id="@+id/mahjong_cloud_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:textColor="#00BFFF"
+                android:textSize="17sp" />
+
+            <TextView
+                android:id="@+id/mahjong_cloud_endpoint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:ellipsize="middle"
+                android:gravity="center"
+                android:maxLines="1"
+                android:textColor="#00BFFF"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/mahjong_cloud_retry"
+                android:layout_width="150dp"
+                android:layout_height="54dp"
+                android:layout_marginTop="18dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="重新连接"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/mahjong_mode_page"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="28dp"
+            android:text="选择开局模式"
+            android:textColor="#44FF66"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="114dp"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/mahjong_mode_normal"
+                android:layout_width="118dp"
+                android:layout_height="114dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="普通对局"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp" />
+
+            <Space android:layout_width="52dp" android:layout_height="1dp" />
+
+            <Button
+                android:id="@+id/mahjong_mode_record"
+                android:layout_width="118dp"
+                android:layout_height="114dp"
+                android:background="@drawable/bg_mahjong_launch_button"
+                android:text="录制对局"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp" />
+        </LinearLayout>
+    </FrameLayout>
+</FrameLayout>

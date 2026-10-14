@@ -10,15 +10,13 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
-import android.os.Handler
-import android.os.Looper
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
 import com.example.ai_assist.scene.mahjong.R
 import kotlin.math.min
 
-/** Single-eye 376 x 282 HUD. Content and notices share this canvas. */
+/** 原版 376 x 282 单眼麻将 HUD。 */
 class MahjongHudView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
@@ -40,16 +38,13 @@ class MahjongHudView @JvmOverloads constructor(
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val tileTypeface = runCatching { resources.getFont(R.font.mahjong_color) }.getOrNull()
     private val tileCache = mutableMapOf<String, Bitmap?>()
-    private val handler = Handler(Looper.getMainLooper())
-    private var payload = MahjongScenePayload.EMPTY
+    private var payload = MahjongScenePayload(emptyList(), emptyList(), "")
     private var diagnosticMessage: String? = null
-    private var notice: String? = null
-    private val hideNotice = Runnable {
-        notice = null
-        invalidate()
-    }
     private var recommendationArrowTop = ARROW_TOP_MIN
-    private val recommendationArrowAnimator = ValueAnimator.ofFloat(ARROW_TOP_MIN, ARROW_TOP_MAX).apply {
+    private val recommendationArrowAnimator = ValueAnimator.ofFloat(
+        ARROW_TOP_MIN,
+        ARROW_TOP_MAX
+    ).apply {
         duration = 900L
         repeatCount = ValueAnimator.INFINITE
         repeatMode = ValueAnimator.REVERSE
@@ -62,19 +57,8 @@ class MahjongHudView @JvmOverloads constructor(
 
     fun render(payload: MahjongScenePayload) {
         this.payload = payload
-        invalidate()
-    }
-
-    fun renderDiagnosticWarning(message: String?) {
-        diagnosticMessage = message
-        invalidate()
-    }
-
-    fun renderNotice(message: String?) {
-        handler.removeCallbacks(hideNotice)
-        notice = message
-        if (message != null) {
-            handler.postDelayed(hideNotice, NOTICE_DURATION_MILLIS)
+        diagnosticMessage = payload.suggestedPlay.takeIf {
+            payload.userHand.isEmpty() && it.isNotBlank()
         }
         invalidate()
     }
@@ -86,7 +70,6 @@ class MahjongHudView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         recommendationArrowAnimator.cancel()
-        handler.removeCallbacks(hideNotice)
         super.onDetachedFromWindow()
     }
 
@@ -112,11 +95,18 @@ class MahjongHudView @JvmOverloads constructor(
         if (payload.userHand.size == 14) {
             val discardIndex = payload.suggestedDiscard?.let(payload.userHand::indexOf) ?: -1
             if (discardIndex >= 0) {
-                val strengthColor = if (payload.recommendationStrength == RecommendationStrength.WEAK) {
-                    warningYellow
-                } else green
+                val strengthColor = if (
+                    payload.recommendationStrength == RecommendationStrength.WEAK
+                ) warningYellow else green
                 drawWarningMark(canvas, 20f, 24f, 3f, strengthColor)
-                drawText(canvas, payload.recommendationStrength.label, 25f, 27f, 7f, strengthColor)
+                drawText(
+                    canvas,
+                    payload.recommendationStrength.label,
+                    25f,
+                    27f,
+                    7f,
+                    strengthColor
+                )
                 val centerX = HAND_LEFT + discardIndex * TILE_STEP + TILE_WIDTH / 2f
                 drawRecommendationArrow(canvas, centerX, recommendationArrowTop)
                 drawText(
@@ -136,19 +126,38 @@ class MahjongHudView @JvmOverloads constructor(
         drawDivider(canvas, 17f, ADVICE_DIVIDER_Y, 157f)
         drawDivider(canvas, 219f, ADVICE_DIVIDER_Y, 360f)
         drawText(canvas, "操作建议", 188f, 86f, 10f, green, Paint.Align.CENTER)
-        drawText(canvas, "向听数：${payload.shanten?.toString() ?: "-"}", 360f, 104f, 11f, green, Paint.Align.RIGHT)
+        drawText(
+            canvas,
+            "向听数：${payload.shanten?.toString() ?: "-"}",
+            360f,
+            104f,
+            11f,
+            green,
+            Paint.Align.RIGHT
+        )
         drawVerticalLabel(canvas, "进张", 17f, 106f)
         payload.jinzhangTiles.take(5).forEachIndexed { index, tile ->
             drawTile(canvas, 29f + index * 22f, 94f, tile)
         }
         drawVerticalLabel(canvas, "可碰", 17f, 133f)
-        payload.pengTiles.forEachIndexed { index, tile -> drawTile(canvas, 29f + index * 22f, 121f, tile) }
+        payload.pengTiles.forEachIndexed { index, tile ->
+            drawTile(canvas, 29f + index * 22f, 121f, tile)
+        }
         drawVerticalLabel(canvas, "可杠", 17f, 160f)
-        payload.gangTiles.forEachIndexed { index, tile -> drawTile(canvas, 29f + index * 22f, 148f, tile) }
+        payload.gangTiles.forEachIndexed { index, tile ->
+            drawTile(canvas, 29f + index * 22f, 148f, tile)
+        }
 
-        notice?.let { drawNoticeChip(canvas, it) }
         val service = if (payload.serviceMode == MahjongServiceMode.LOCAL) "本地" else "云端"
-        drawText(canvas, "${service}服务运行中 · 三击结束", 360f, 265f, 12f, statusGreen, Paint.Align.RIGHT)
+        drawText(
+            canvas,
+            "${service}服务运行中 · 三击结束",
+            360f,
+            265f,
+            12f,
+            statusGreen,
+            Paint.Align.RIGHT
+        )
     }
 
     private fun drawMeldFrame(canvas: Canvas, meldTiles: List<String>) {
@@ -156,7 +165,9 @@ class MahjongHudView @JvmOverloads constructor(
         val left = 361f - frameWidth
         linePaint.color = green
         canvas.drawRoundRect(RectF(left, 28f, 361f, 61f), 6f, 6f, linePaint)
-        meldTiles.forEachIndexed { index, tile -> drawTile(canvas, left + 3f + index * TILE_STEP, 32f, tile) }
+        meldTiles.forEachIndexed { index, tile ->
+            drawTile(canvas, left + 3f + index * TILE_STEP, 32f, tile)
+        }
         drawText(canvas, "副", 353f, 42f, 11f, green, Paint.Align.CENTER)
         drawText(canvas, "露", 353f, 56f, 11f, green, Paint.Align.CENTER)
     }
@@ -175,18 +186,6 @@ class MahjongHudView @JvmOverloads constructor(
     private fun drawDiagnostic(canvas: Canvas, message: String) {
         drawWarningMark(canvas, 20f, 76f, 3f, errorRed)
         drawText(canvas, message, 25f, 79f, 7f, errorRed)
-    }
-
-    private fun drawNoticeChip(canvas: Canvas, label: String) {
-        textPaint.textSize = 10f
-        val width = (28f + textPaint.measureText(label)).coerceAtLeast(78f)
-        val chip = RectF(17f, 251f, 17f + width, 267f)
-        fillPaint.color = Color.argb(82, Color.red(warningYellow), Color.green(warningYellow), Color.blue(warningYellow))
-        canvas.drawRoundRect(chip, 8f, 8f, fillPaint)
-        linePaint.color = warningYellow
-        canvas.drawRoundRect(chip, 8f, 8f, linePaint)
-        drawWarningMark(canvas, 28f, 259f, 4f, warningYellow)
-        drawText(canvas, label, 36f, 263f, 10f, warningYellow)
     }
 
     private fun drawTile(canvas: Canvas, x: Float, y: Float, tile: String) {
@@ -224,7 +223,13 @@ class MahjongHudView @JvmOverloads constructor(
         canvas.drawPath(path, fillPaint)
     }
 
-    private fun drawWarningMark(canvas: Canvas, centerX: Float, centerY: Float, radius: Float, color: Int) {
+    private fun drawWarningMark(
+        canvas: Canvas,
+        centerX: Float,
+        centerY: Float,
+        radius: Float,
+        color: Int
+    ) {
         val path = Path().apply {
             moveTo(centerX, centerY - radius)
             lineTo(centerX - radius, centerY + radius)
@@ -233,7 +238,15 @@ class MahjongHudView @JvmOverloads constructor(
         }
         fillPaint.color = color
         canvas.drawPath(path, fillPaint)
-        drawText(canvas, "!", centerX, centerY + radius * 0.7f, radius * 1.35f, warningInk, Paint.Align.CENTER)
+        drawText(
+            canvas,
+            "!",
+            centerX,
+            centerY + radius * 0.7f,
+            radius * 1.35f,
+            warningInk,
+            Paint.Align.CENTER
+        )
     }
 
     private fun drawText(
@@ -261,6 +274,5 @@ class MahjongHudView @JvmOverloads constructor(
         const val ARROW_TOP_MIN = 56.5f
         const val ARROW_TOP_MAX = 58.5f
         const val ADVICE_DIVIDER_Y = 82f
-        const val NOTICE_DURATION_MILLIS = 3_000L
     }
 }

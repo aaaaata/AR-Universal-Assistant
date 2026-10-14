@@ -5,14 +5,19 @@ services:
       dockerfile: server/Dockerfile
     container_name: mahjong_backend
     ports:
-      - "8000:8000"
+      - "8000:8080"
     volumes:
       - ./server/data:/app/server/data
     environment:
       CLOUD_HOST: 0.0.0.0
-      CLOUD_PORT: 8000
+      CLOUD_PORT: 8080
       CLOUD_WORKERS: 1
       CLOUD_RUNTIME_ENV: local
       CLOUD_API_KEY: ${CLOUD_API_KEY:-local-token}
+      CLOUD_REGION_MANIFEST: /app/server/models/region.manifest.json
+      CLOUD_TILE_MANIFEST: /app/server/models/tile.manifest.json
+      CLOUD_DATABASE_PATH: /app/server/data/cloud.db
+      CLOUD_DEBUG_IMAGE_DIR: /app/server/data/debug_images
+      CLOUD_EVIDENCE_DIR: /app/server/data/evidence
     restart: unless-stopped
 

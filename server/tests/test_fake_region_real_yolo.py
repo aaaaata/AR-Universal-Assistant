@@ -26,8 +26,8 @@ def test_raw_png_with_fake_regions_reaches_current_tile_detector(tmp_path: Path)
     image = sample_path.read_bytes()
     settings = Settings(
         api_key="test-key",
-        database_path=tmp_path / "cloud.db",
-        tile_manifest_path=repo_root / "server" / "models" / "tile.manifest.json",
+        database_path=tmp_path / "server.db",
+        tile_manifest_path=repo_root / "cloud" / "models" / "tile.manifest.json",
         region_manifest_path=None,
     )
     regions = [
@@ -38,7 +38,7 @@ def test_raw_png_with_fake_regions_reaches_current_tile_detector(tmp_path: Path)
     service = AnalysisService(
         settings=settings,
         store=SQLiteStore(settings.database_path),
-        profile=load_rule_profile(repo_root / "server" / "rules" / "guangdong_mvp_v1.json"),
+        profile=load_rule_profile(repo_root / "cloud" / "rules" / "guangdong_mvp_v1.json"),
         region_detector=FakeRegionDetector(regions),
         tile_detector=create_tile_detector(settings.tile_manifest_path),
     )
