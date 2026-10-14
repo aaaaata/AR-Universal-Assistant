@@ -75,7 +75,7 @@ enum class InputAction {
 
 /**
  * 一帧已编码的图像。
- * 场景上传后负责删除 [file]。
+ * SessionManager 在单帧处理结束后负责删除 [file]。
  */
 data class Frame(
     val file: File,
@@ -84,8 +84,23 @@ data class Frame(
     val medianLuma: Int? = null
 )
 
-/** 一个场景会话占位。 */
-interface Session
+/** Core 运行帧流所需的场景参数。 */
+data class FrameStreamConfig(
+    val intervalMillis: Long,
+    val cameraConfig: CapabilityConfig
+) {
+    init {
+        require(intervalMillis > 0) { "intervalMillis must be positive" }
+    }
+}
+
+/** 单次场景会话。场景管理业务会话，Core 的 SessionManager 管理帧流。 */
+interface Session {
+    val frameStreamConfig: FrameStreamConfig
+    suspend fun start()
+    suspend fun processFrame(frame: Frame, sequenceId: Long): SceneResult?
+    suspend fun close()
+}
 
 /** 能力租约占位。场景不能自己创建或释放 Camera。 */
 interface CapabilityLease
@@ -172,7 +187,6 @@ interface CameraScheduler {
 interface SceneContext {
     val sessionId: String
     val config: SceneConfig
-    val cameraScheduler: CameraScheduler
 
     /** 已租到的能力。场景不能自己创建或释放相机。 */
     fun requireCapability(type: CapabilityType): CapabilityLease
@@ -205,8 +219,7 @@ interface SceneProvider {
     val requiredCapabilities: List<CapabilityType>
     fun createSceneConfig(): SceneConfig
     fun createRenderer(): SceneRenderer
-    fun start(sceneContext: SceneContext): Flow<SceneResult>
-    fun stop()
+    fun createSession(sceneContext: SceneContext): Session
 }
 
 /** 可选启动配置的场景。未实现此接口的场景可直接使用默认配置启动。 */
@@ -262,13 +275,15 @@ interface CvGameCore {
 }
 
 /**
- * 会话管理、请求调度和跳帧门禁。
- * 上一帧未完成时 [submitFrame] 返回 null。
+ * Core 层会话调度。顺序消费 Frame Flow，上一帧处理完成后才请求下一帧。
  */
 interface SessionManager {
-    fun createSession(sceneId: String, provider: SceneProvider): Session
-    suspend fun submitFrame(image: Frame): SceneResult?
-    fun endSession()
+    suspend fun runSession(
+        session: Session,
+        sceneContext: SceneContext,
+        onStarted: () -> Unit,
+        onResult: suspend (SceneResult) -> Unit
+    )
 }
 
 /**

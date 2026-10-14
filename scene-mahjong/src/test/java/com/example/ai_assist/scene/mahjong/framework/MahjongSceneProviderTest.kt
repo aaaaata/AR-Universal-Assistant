@@ -1,7 +1,5 @@
 package com.example.ai_assist.scene.mahjong.framework
 
-import com.example.ai_assist.sdk.framework.CameraScheduler
-import com.example.ai_assist.sdk.framework.CapabilityConfig
 import com.example.ai_assist.sdk.framework.CapabilityLease
 import com.example.ai_assist.sdk.framework.CapabilityType
 import com.example.ai_assist.sdk.framework.Frame
@@ -10,17 +8,12 @@ import com.example.ai_assist.sdk.framework.SceneConfig
 import com.example.ai_assist.sdk.framework.SceneConnection
 import com.example.ai_assist.sdk.framework.SceneContext
 import java.io.File
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.single
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,29 +39,31 @@ class MahjongSceneProviderTest {
     }
 
     @Test
-    fun exchangesCameraFrameThroughFrameworkContractsAndEndsSession() = runBlocking {
+    fun processesSingleFrameAndEndsCloudSession() = runBlocking<Unit> {
         val frameFile = createFrameFile(byteArrayOf(1, 2, 3))
         val service = FakeCloudService()
-        val context = FakeSceneContext(
-            credentialValue = "secret",
-            frames = listOf(Frame(frameFile, 90, 123L))
-        )
+        val context = FakeSceneContext(credentialValue = "secret")
+        val session = provider(service).createSession(context)
 
-        val result = provider(service).start(context).single()
+        session.start()
+        val result = session.processFrame(Frame(frameFile, 90, 123L), sequenceId = 7L)
+        session.close()
 
-        assertEquals("framework-session", result.sessionId)
+        assertEquals("framework-session", result?.sessionId)
+        assertEquals(7L, result?.sequenceId)
         assertEquals(listOf(listOf<Byte>(1, 2, 3)), service.images.map { it.bytes.toList() })
         assertEquals(123L, service.images.single().capturedAtMillis)
         assertEquals(90, service.images.single().imageRotationDegrees)
         assertEquals(listOf("cloud-session"), service.endedSessions)
-        assertEquals(listOf(CapabilityType.CAMERA), context.requiredCapabilities)
-        assertFalse(frameFile.exists())
+        assertTrue(frameFile.exists())
+        frameFile.delete()
     }
 
     @Test
     fun missingCredentialIsReportedAsNonRecoverable() = runBlocking {
-        val context = FakeSceneContext(credentialValue = null, frames = emptyList())
-        val error = runCatching { provider(FakeCloudService()).start(context).single() }.exceptionOrNull()
+        val context = FakeSceneContext(credentialValue = null)
+        val session = provider(FakeCloudService()).createSession(context)
+        val error = runCatching { session.start() }.exceptionOrNull()
 
         assertTrue(error is IllegalStateException)
         assertEquals("MAHJONG_CREDENTIAL_MISSING", context.errors.single().code)
@@ -76,41 +71,27 @@ class MahjongSceneProviderTest {
     }
 
     @Test
-    fun recoverableFrameFailureDoesNotStopFollowingFrames() = runBlocking {
+    fun recoverableFrameFailureDoesNotPreventFollowingFrame() = runBlocking<Unit> {
         val first = createFrameFile(byteArrayOf(1))
         val second = createFrameFile(byteArrayOf(2))
         val service = FakeCloudService(failFirstSubmit = true)
-        val context = FakeSceneContext(
-            credentialValue = "secret",
-            frames = listOf(Frame(first, 0, 1L), Frame(second, 0, 2L))
-        )
+        val context = FakeSceneContext(credentialValue = "secret")
+        val session = provider(service).createSession(context)
 
-        val result = provider(service).start(context).single()
+        session.start()
+        val firstResult = session.processFrame(Frame(first, 0, 1L), sequenceId = 1L)
+        val secondResult = session.processFrame(Frame(second, 0, 2L), sequenceId = 2L)
+        session.close()
 
-        assertEquals(2L, result.sequenceId)
+        assertNull(firstResult)
+        assertEquals(2L, secondResult?.sequenceId)
         assertEquals("MAHJONG_FRAME_SUBMIT_FAILED", context.errors.single().code)
         assertTrue(context.errors.single().recoverable)
-        assertFalse(first.exists())
-        assertFalse(second.exists())
+        assertTrue(first.exists())
+        assertTrue(second.exists())
         assertEquals(listOf("cloud-session"), service.endedSessions)
-    }
-
-    @Test
-    fun stopCancelsCollectionAndEndsCloudSession() = runBlocking {
-        val service = FakeCloudService()
-        val context = FakeSceneContext(
-            credentialValue = "secret",
-            frameFlow = flow { awaitCancellation() }
-        )
-        val provider = provider(service)
-        val collection = launch { provider.start(context).collect {} }
-        service.sessionCreated.await()
-
-        provider.stop()
-        collection.join()
-
-        assertTrue(collection.isCancelled)
-        assertEquals(listOf("cloud-session"), service.endedSessions)
+        first.delete()
+        second.delete()
     }
 
     @Test
@@ -144,12 +125,8 @@ class MahjongSceneProviderTest {
     ) : MahjongCloudService {
         val images = mutableListOf<MahjongImageSubmission>()
         val endedSessions = mutableListOf<String>()
-        val sessionCreated = CompletableDeferred<Unit>()
 
-        override suspend fun createSession(): Result<String> {
-            sessionCreated.complete(Unit)
-            return Result.success("cloud-session")
-        }
+        override suspend fun createSession(): Result<String> = Result.success("cloud-session")
 
         override suspend fun submitImage(
             sessionId: String,
@@ -180,28 +157,15 @@ class MahjongSceneProviderTest {
     private data class ReportedError(val code: String, val recoverable: Boolean)
 
     private class FakeSceneContext(
-        private val credentialValue: String?,
-        private val frameFlow: Flow<Frame>
+        private val credentialValue: String?
     ) : SceneContext {
-        constructor(credentialValue: String?, frames: List<Frame>) :
-            this(credentialValue, frames.asFlow())
-
         override val sessionId: String = "framework-session"
         override val config: SceneConfig = MahjongSceneConfig()
-        override val cameraScheduler: CameraScheduler = object : CameraScheduler {
-            override fun frames(
-                intervalMillis: Long,
-                cameraConfig: CapabilityConfig
-            ): Flow<Frame> = frameFlow
-        }
         override val inputActions: Flow<InputAction> = emptyFlow()
-        val requiredCapabilities = mutableListOf<CapabilityType>()
         val errors = mutableListOf<ReportedError>()
 
-        override fun requireCapability(type: CapabilityType): CapabilityLease {
-            requiredCapabilities += type
-            return object : CapabilityLease {}
-        }
+        override fun requireCapability(type: CapabilityType): CapabilityLease =
+            object : CapabilityLease {}
 
         override fun credential(): String? = credentialValue
 

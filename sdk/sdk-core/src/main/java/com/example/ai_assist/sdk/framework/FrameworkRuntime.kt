@@ -77,7 +77,6 @@ class DefaultSceneContext(
     override val sessionId: String,
     val sceneId: String,
     override val config: SceneConfig,
-    override val cameraScheduler: CameraScheduler,
     private val resourceManager: ResourceManager,
     private val credentialProvider: CredentialProvider,
     private val eventDispatcher: DefaultEventDispatcher,
@@ -127,8 +126,45 @@ class DefaultSceneContext(
     }
 }
 
+/** Core 独占 Frame Flow 的默认会话调度器。顺序 collect 自然提供单帧背压。 */
+class DefaultSessionManager(
+    private val cameraScheduler: CameraScheduler
+) : SessionManager {
+    override suspend fun runSession(
+        session: Session,
+        sceneContext: SceneContext,
+        onStarted: () -> Unit,
+        onResult: suspend (SceneResult) -> Unit
+    ) {
+        var sequenceId = 0L
+        try {
+            session.start()
+            onStarted()
+            val frameConfig = session.frameStreamConfig
+            cameraScheduler.frames(
+                intervalMillis = frameConfig.intervalMillis,
+                cameraConfig = frameConfig.cameraConfig
+            ).collect { frame ->
+                sequenceId += 1
+                try {
+                    session.processFrame(frame, sequenceId)?.let { onResult(it) }
+                } finally {
+                    if (!frame.file.delete() && frame.file.exists()) {
+                        sceneContext.reportDiagnostic(
+                            "FRAME_DELETE_FAILED",
+                            "Unable to delete processed frame"
+                        )
+                    }
+                }
+            }
+        } finally {
+            withContext(NonCancellable) { session.close() }
+        }
+    }
+}
+
 /**
- * 当前契约的最小可运行 Core。SceneProvider 负责业务 Frame 流，Core 负责状态、资源和事件。
+ * 当前契约的最小可运行 Core。SessionManager 负责 Frame 流，场景 Session 负责单帧业务。
  */
 class DefaultCvGameCore(
     private val cameraScheduler: CameraScheduler,
@@ -136,7 +172,8 @@ class DefaultCvGameCore(
     private val credentialProvider: CredentialProvider = CredentialProvider { null },
     private val inputActions: Flow<InputAction> = emptyFlow(),
     private val stateMachine: DefaultStateMachine = DefaultStateMachine(),
-    private val eventDispatcher: DefaultEventDispatcher = DefaultEventDispatcher()
+    private val eventDispatcher: DefaultEventDispatcher = DefaultEventDispatcher(),
+    private val sessionManager: SessionManager = DefaultSessionManager(cameraScheduler)
 ) : CvGameCore {
     private val providers = linkedMapOf<String, SceneProvider>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -175,7 +212,6 @@ class DefaultCvGameCore(
                 sessionId = sessionId,
                 sceneId = sceneId,
                 config = sessionConfig ?: provider.createSceneConfig(),
-                cameraScheduler = cameraScheduler,
                 resourceManager = resourceManager,
                 credentialProvider = credentialProvider,
                 eventDispatcher = eventDispatcher,
@@ -201,7 +237,6 @@ class DefaultCvGameCore(
                 }
             }
         } ?: return
-        active.provider.stop()
         active.job?.cancel(CancellationException("Scene stopped by host"))
     }
 
@@ -227,18 +262,25 @@ class DefaultCvGameCore(
         var failed = false
         try {
             context.acquireRequiredCapabilities(active.provider.requiredCapabilities)
-            transition(active.provider, active.sessionId, SdkState.RUNNING)
-            active.provider.start(context).collect { result ->
-                eventDispatcher.dispatch(
-                    SdkEvent.ResultReceived(
-                        sceneId = active.provider.sceneId,
-                        sessionId = active.sessionId,
-                        sequenceId = result.sequenceId,
-                        occurredAtMillis = System.currentTimeMillis(),
-                        result = result
+            val session = active.provider.createSession(context)
+            sessionManager.runSession(
+                session = session,
+                sceneContext = context,
+                onStarted = {
+                    transition(active.provider, active.sessionId, SdkState.RUNNING)
+                },
+                onResult = { result ->
+                    eventDispatcher.dispatch(
+                        SdkEvent.ResultReceived(
+                            sceneId = active.provider.sceneId,
+                            sessionId = active.sessionId,
+                            sequenceId = result.sequenceId,
+                            occurredAtMillis = System.currentTimeMillis(),
+                            result = result
+                        )
                     )
-                )
-            }
+                }
+            )
         } catch (cancelled: CancellationException) {
             if (!active.stopping.get()) throw cancelled
         } catch (error: Throwable) {
@@ -257,7 +299,6 @@ class DefaultCvGameCore(
             }
         } finally {
             withContext(NonCancellable) {
-                active.provider.stop()
                 resourceManager.releaseAll()
                 synchronized(this@DefaultCvGameCore) {
                     if (activeScene === active) activeScene = null

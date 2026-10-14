@@ -1,24 +1,27 @@
 package com.example.ai_assist.sdk.framework
 
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FrameworkRuntimeTest {
     @Test
-    fun coreRunsProviderAndPublishesResultAndStates() = runBlocking {
+    fun coreOwnsFrameFlowPublishesResultAndCleansFrame() = runBlocking {
+        val frameFile = File.createTempFile("core-frame-", ".jpg").apply { writeBytes(byteArrayOf(1)) }
         val provider = FakeProvider()
         val resources = FakeResourceManager()
         val core = DefaultCvGameCore(
-            cameraScheduler = EmptyCameraScheduler,
+            cameraScheduler = SingleFrameScheduler(frameFile),
             resourceManager = resources,
             credentialProvider = CredentialProvider { "local-token" }
         )
@@ -30,16 +33,19 @@ class FrameworkRuntimeTest {
 
         assertTrue(events.any { it is SdkEvent.StateChanged && it.state == SdkState.RUNNING })
         assertTrue(events.any { it is SdkEvent.ResultReceived })
+        assertEquals(listOf(1L), provider.processedSequences)
         assertEquals("local-token", provider.credential)
+        assertTrue(provider.closed)
+        assertFalse(frameFile.exists())
         assertEquals(1, resources.acquireCount)
         assertEquals(1, resources.releaseCount)
         assertEquals(SdkState.READY, core.getCurrentState())
     }
 
     @Test
-    fun stopCancelsProviderAndReturnsToReady() = runBlocking {
+    fun stopCancelsSessionAndReturnsToReady() = runBlocking {
         val provider = WaitingProvider()
-        val core = DefaultCvGameCore(EmptyCameraScheduler, FakeResourceManager())
+        val core = DefaultCvGameCore(WaitingCameraScheduler, FakeResourceManager())
         core.registerScene(provider)
         val events = core.startScene(provider.sceneId)
         events.first { it is SdkEvent.StateChanged && it.state == SdkState.RUNNING }
@@ -48,6 +54,7 @@ class FrameworkRuntimeTest {
         core.stopScene()
         events.first { it is SdkEvent.StateChanged && it.state == SdkState.READY }
 
+        assertTrue(provider.closed)
         assertEquals(SdkState.READY, core.getCurrentState())
     }
 
@@ -57,13 +64,23 @@ class FrameworkRuntimeTest {
         override val version = "1"
         override val requiredCapabilities = listOf(CapabilityType.CAMERA)
         var credential: String? = null
+        var closed = false
+        val processedSequences = mutableListOf<Long>()
         override fun createSceneConfig(): SceneConfig = object : SceneConfig {}
         override fun createRenderer(): SceneRenderer = FakeRenderer
-        override fun start(sceneContext: SceneContext): Flow<SceneResult> = flow {
-            credential = sceneContext.credential()
-            emit(result(sceneContext.sessionId))
+        override fun createSession(sceneContext: SceneContext): Session = object : Session {
+            override val frameStreamConfig = FrameStreamConfig(1L, object : CapabilityConfig {})
+            override suspend fun start() {
+                credential = sceneContext.credential()
+            }
+            override suspend fun processFrame(frame: Frame, sequenceId: Long): SceneResult {
+                processedSequences += sequenceId
+                return result(sceneContext.sessionId, sequenceId)
+            }
+            override suspend fun close() {
+                closed = true
+            }
         }
-        override fun stop() = Unit
     }
 
     private class WaitingProvider : SceneProvider {
@@ -72,13 +89,19 @@ class FrameworkRuntimeTest {
         override val version = "1"
         override val requiredCapabilities = emptyList<CapabilityType>()
         val started = CompletableDeferred<Unit>()
+        var closed = false
         override fun createSceneConfig(): SceneConfig = object : SceneConfig {}
         override fun createRenderer(): SceneRenderer = FakeRenderer
-        override fun start(sceneContext: SceneContext): Flow<SceneResult> = flow {
-            started.complete(Unit)
-            kotlinx.coroutines.awaitCancellation()
+        override fun createSession(sceneContext: SceneContext): Session = object : Session {
+            override val frameStreamConfig = FrameStreamConfig(1L, object : CapabilityConfig {})
+            override suspend fun start() {
+                started.complete(Unit)
+            }
+            override suspend fun processFrame(frame: Frame, sequenceId: Long): SceneResult? = null
+            override suspend fun close() {
+                closed = true
+            }
         }
-        override fun stop() = Unit
     }
 
     private class FakeResourceManager : ResourceManager {
@@ -93,9 +116,16 @@ class FrameworkRuntimeTest {
         }
     }
 
-    private object EmptyCameraScheduler : CameraScheduler {
-        override fun frames(intervalMillis: Long, cameraConfig: CapabilityConfig): Flow<Frame> =
-            emptyFlow()
+    private class SingleFrameScheduler(private val file: File) : CameraScheduler {
+        override fun frames(intervalMillis: Long, cameraConfig: CapabilityConfig): Flow<Frame> = flow {
+            emit(Frame(file, 0, 1L))
+        }
+    }
+
+    private object WaitingCameraScheduler : CameraScheduler {
+        override fun frames(intervalMillis: Long, cameraConfig: CapabilityConfig): Flow<Frame> = flow {
+            awaitCancellation()
+        }
     }
 
     private object FakeRenderer : SceneRenderer {
@@ -105,10 +135,10 @@ class FrameworkRuntimeTest {
     }
 
     private companion object {
-        fun result(sessionId: String) = SceneResult(
+        fun result(sessionId: String, sequenceId: Long) = SceneResult(
             sceneId = "fake",
             sessionId = sessionId,
-            sequenceId = 1,
+            sequenceId = sequenceId,
             updatedAtMillis = 1,
             summary = SceneSummary("done", "complete")
         )
