@@ -10,6 +10,8 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.os.Handler
+import android.os.Looper
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
@@ -40,6 +42,12 @@ class MahjongHudView @JvmOverloads constructor(
     private val tileCache = mutableMapOf<String, Bitmap?>()
     private var payload = MahjongScenePayload(emptyList(), emptyList(), "")
     private var diagnosticMessage: String? = null
+    private var notice: String? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val hideNotice = Runnable {
+        notice = null
+        invalidate()
+    }
     private var recommendationArrowTop = ARROW_TOP_MIN
     private val recommendationArrowAnimator = ValueAnimator.ofFloat(
         ARROW_TOP_MIN,
@@ -57,9 +65,18 @@ class MahjongHudView @JvmOverloads constructor(
 
     fun render(payload: MahjongScenePayload) {
         this.payload = payload
-        diagnosticMessage = payload.suggestedPlay.takeIf {
-            payload.userHand.isEmpty() && it.isNotBlank()
-        }
+        invalidate()
+    }
+
+    fun renderDiagnosticWarning(message: String?) {
+        diagnosticMessage = message
+        invalidate()
+    }
+
+    fun renderNotice(message: String?) {
+        handler.removeCallbacks(hideNotice)
+        notice = message
+        if (message != null) handler.postDelayed(hideNotice, NOTICE_DURATION_MILLIS)
         invalidate()
     }
 
@@ -70,6 +87,7 @@ class MahjongHudView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         recommendationArrowAnimator.cancel()
+        handler.removeCallbacks(hideNotice)
         super.onDetachedFromWindow()
     }
 
@@ -152,6 +170,7 @@ class MahjongHudView @JvmOverloads constructor(
             }
         }
 
+        notice?.let { drawNoticeChip(canvas, it) }
         val service = if (payload.serviceMode == MahjongServiceMode.LOCAL) "本地" else "云端"
         drawText(
             canvas,
@@ -190,6 +209,23 @@ class MahjongHudView @JvmOverloads constructor(
     private fun drawDiagnostic(canvas: Canvas, message: String) {
         drawWarningMark(canvas, 20f, 76f, 3f, errorRed)
         drawText(canvas, message, 25f, 79f, 7f, errorRed)
+    }
+
+    private fun drawNoticeChip(canvas: Canvas, label: String) {
+        textPaint.textSize = 10f
+        val chipWidth = (28f + textPaint.measureText(label)).coerceAtLeast(78f)
+        val chip = RectF(17f, 251f, 17f + chipWidth, 267f)
+        fillPaint.color = Color.argb(
+            82,
+            Color.red(warningYellow),
+            Color.green(warningYellow),
+            Color.blue(warningYellow)
+        )
+        canvas.drawRoundRect(chip, 8f, 8f, fillPaint)
+        linePaint.color = warningYellow
+        canvas.drawRoundRect(chip, 8f, 8f, linePaint)
+        drawWarningMark(canvas, 28f, 259f, 4f, warningYellow)
+        drawText(canvas, label, 36f, 263f, 10f, warningYellow)
     }
 
     private fun drawTile(canvas: Canvas, x: Float, y: Float, tile: String) {
@@ -278,5 +314,6 @@ class MahjongHudView @JvmOverloads constructor(
         const val ARROW_TOP_MIN = 56.5f
         const val ARROW_TOP_MAX = 58.5f
         const val ADVICE_DIVIDER_Y = 82f
+        const val NOTICE_DURATION_MILLIS = 3_000L
     }
 }

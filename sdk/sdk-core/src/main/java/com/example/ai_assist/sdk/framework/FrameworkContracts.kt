@@ -64,7 +64,9 @@ data class Frame(
     val imageRotationDegrees: Int,
     val capturedAtMillis: Long,
     /** 单调时钟时间，仅用于会话内安排后续取帧，不用于网络时间戳。 */
-    val selectedAtElapsedMillis: Long
+    val selectedAtElapsedMillis: Long,
+    /** 0..255 的中位亮度；相机实现无法计算时为 null。 */
+    val medianLuma: Int? = null
 )
 
 /** Core 持续运行相机流所需的场景参数。业务取帧时机由 [FrameController] 决定。 */

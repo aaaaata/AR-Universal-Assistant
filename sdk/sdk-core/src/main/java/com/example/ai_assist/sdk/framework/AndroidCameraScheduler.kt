@@ -3,6 +3,8 @@ package com.example.ai_assist.sdk.framework
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -222,11 +224,14 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
             var outputFile: File? = null
             try {
                 outputFile = File.createTempFile("cv-frame-", ".jpg", appContext.cacheDir)
+                val medianLuma: Int?
                 val imageRotationDegrees = if (outputFormat == ImageFormat.YUV_420_888) {
+                    medianLuma = Yuv420JpegEncoder.medianLuma(image)
                     Yuv420JpegEncoder.writeJpeg(image, outputFile, jpegQuality)
                     jpegOrientation
                 } else {
-                    writeHardwareJpeg(image, outputFile)
+                    val jpeg = writeHardwareJpeg(image, outputFile)
+                    medianLuma = estimateMedianLuma(jpeg)
                     JPEG_FRAME_ROTATION_DEGREES
                 }
                 if (synchronized(lock) { generation == requestGeneration }) {
@@ -235,7 +240,8 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
                             file = outputFile,
                             imageRotationDegrees = imageRotationDegrees,
                             capturedAtMillis = System.currentTimeMillis(),
-                            selectedAtElapsedMillis = selectedAtElapsedMillis
+                            selectedAtElapsedMillis = selectedAtElapsedMillis,
+                            medianLuma = medianLuma
                         )
                     )
                 } else {
@@ -312,10 +318,32 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
         }
     }
 
-    private fun writeHardwareJpeg(image: Image, outputFile: File) {
+    private fun writeHardwareJpeg(image: Image, outputFile: File): ByteArray {
         val buffer = image.planes[0].buffer
         val bytes = ByteArray(buffer.remaining()).also(buffer::get)
         FileOutputStream(outputFile).use { it.write(bytes) }
+        return bytes
+    }
+
+    private fun estimateMedianLuma(jpeg: ByteArray): Int? {
+        val options = BitmapFactory.Options().apply { inSampleSize = LUMA_DECODE_SAMPLE_SIZE }
+        val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, options) ?: return null
+        return try {
+            val samples = ArrayList<Int>()
+            for (y in 0 until bitmap.height step LUMA_PIXEL_STEP) {
+                for (x in 0 until bitmap.width step LUMA_PIXEL_STEP) {
+                    val pixel = bitmap.getPixel(x, y)
+                    samples += (
+                        77 * Color.red(pixel) +
+                            150 * Color.green(pixel) +
+                            29 * Color.blue(pixel)
+                        ) shr 8
+                }
+            }
+            samples.takeIf { it.isNotEmpty() }?.sorted()?.let { it[it.size / 2] }
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     override fun close() {
@@ -345,6 +373,8 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
     private companion object {
         const val MAX_IMAGES = 4
         const val JPEG_FRAME_ROTATION_DEGREES = 0
+        const val LUMA_DECODE_SAMPLE_SIZE = 16
+        const val LUMA_PIXEL_STEP = 2
 
         fun elapsedRealtimeMillis(): Long =
             TimeUnit.NANOSECONDS.toMillis(System.nanoTime())

@@ -1,5 +1,7 @@
 package com.example.ai_assist.scene.mahjong.framework
 
+import android.os.SystemClock
+import android.util.Log
 import com.google.gson.annotations.SerializedName
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -15,7 +17,7 @@ import retrofit2.http.POST
 import retrofit2.http.Path
 
 internal data class StartSessionRequest(
-    @SerializedName("rule_profile_id") val ruleProfileId: String = "guangdong_mvp_v1",
+    @SerializedName("rule_profile_id") val ruleProfileId: String,
     @SerializedName("recording_mode") val recordingMode: String = "normal"
 )
 
@@ -57,6 +59,25 @@ data class MahjongConfidence(
     val reasons: List<String> = emptyList()
 )
 
+data class MahjongImageInfo(
+    val width: Int = 0,
+    val height: Int = 0
+)
+
+data class MahjongBoundingBox(
+    val x1: Double = 0.0,
+    val y1: Double = 0.0,
+    val x2: Double = 0.0,
+    val y2: Double = 0.0
+)
+
+data class MahjongTileDetection(
+    @SerializedName("region_type") val regionType: String = "",
+    @SerializedName("tile_confidence") val tileConfidence: Double = 0.0,
+    @SerializedName("bbox_in_original_image")
+    val bboxInOriginalImage: MahjongBoundingBox? = null
+)
+
 data class MahjongAnalyzeResult(
     @SerializedName("analysis_id") val analysisId: String = "",
     val status: String = "",
@@ -66,7 +87,12 @@ data class MahjongAnalyzeResult(
     @SerializedName("bonus_tiles") val bonusTiles: List<String> = emptyList(),
     val suggestion: MahjongSuggestion? = null,
     val confidence: MahjongConfidence? = null,
-    val warnings: List<String> = emptyList()
+    val warnings: List<String> = emptyList(),
+    val image: MahjongImageInfo? = null,
+    @SerializedName("tile_detections")
+    val tileDetections: List<MahjongTileDetection> = emptyList(),
+    @SerializedName("has_low_confidence_hand_tile_detection")
+    val hasLowConfidenceHandTileDetection: Boolean? = null
 ) : MahjongCloudResult {
     fun effectiveTileCount(): Int = handTiles.size +
         meldGroups.sumOf { it.tiles.size } -
@@ -120,6 +146,7 @@ internal interface MahjongApiService {
 internal class RetrofitMahjongCloudService(
     private val api: MahjongApiService,
     private val apiKey: String,
+    private val ruleProfileId: String,
     private val recordingMode: String
 ) : MahjongCloudService {
     private val sequence = AtomicLong(0L)
@@ -133,30 +160,87 @@ internal class RetrofitMahjongCloudService(
         imageRotationDegrees = rotationDegrees
     }
 
-    override suspend fun createSession(): Result<String> = runCatching {
-        api.createSession(apiKey, StartSessionRequest(recordingMode = recordingMode)).sessionId
+    override suspend fun createSession(): Result<String> {
+        val startedAt = SystemClock.elapsedRealtime()
+        return runCatching {
+            api.createSession(
+                apiKey,
+                StartSessionRequest(ruleProfileId, recordingMode)
+            ).sessionId
+        }.onSuccess { sessionId ->
+            Log.i(
+                TAG,
+                "event=session_create_complete session_id=$sessionId " +
+                    "duration_ms=${SystemClock.elapsedRealtime() - startedAt}"
+            )
+        }.onFailure { error ->
+            Log.w(
+                TAG,
+                "event=session_create_failed duration_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "error_code=${error::class.java.simpleName}",
+                error
+            )
+        }
     }
 
     override suspend fun submitImage(
         sessionId: String,
         image: ByteArray
-    ): Result<MahjongCloudResult> = runCatching {
-        api.submitImage(
-            sessionId = sessionId,
-            apiKey = apiKey,
-            requestId = UUID.randomUUID().toString(),
-            sequenceId = sequence.incrementAndGet(),
-            frameTimestampMillis = frameTimestampMillis.takeIf { it > 0 }
-                ?: System.currentTimeMillis(),
-            frameCount = 1,
-            imageRotationDegrees = imageRotationDegrees,
-            image = image.toRequestBody("image/jpeg".toMediaType())
-        )
+    ): Result<MahjongCloudResult> {
+        val requestId = UUID.randomUUID().toString()
+        val sequenceId = sequence.incrementAndGet()
+        val startedAt = SystemClock.elapsedRealtime()
+        return runCatching {
+            api.submitImage(
+                sessionId = sessionId,
+                apiKey = apiKey,
+                requestId = requestId,
+                sequenceId = sequenceId,
+                frameTimestampMillis = frameTimestampMillis.takeIf { it > 0 }
+                    ?: System.currentTimeMillis(),
+                frameCount = 1,
+                imageRotationDegrees = imageRotationDegrees,
+                image = image.toRequestBody("image/jpeg".toMediaType())
+            )
+        }.onSuccess { response ->
+            Log.i(
+                TAG,
+                "event=frame_cloud_round_trip_complete request_id=$requestId " +
+                    "sequence_id=$sequenceId analysis_id=${response.analysisId} " +
+                    "status=${response.status} duration_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "error_code=${response.diagnosticCode ?: "none"}"
+            )
+        }.onFailure { error ->
+            Log.w(
+                TAG,
+                "event=frame_cloud_round_trip_failed request_id=$requestId " +
+                    "sequence_id=$sequenceId duration_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "error_code=${error::class.java.simpleName}",
+                error
+            )
+        }
     }
 
-    override suspend fun endSession(sessionId: String): Result<Unit> = runCatching {
-        api.endSession(sessionId, apiKey)
-        Unit
+    override suspend fun endSession(sessionId: String): Result<Unit> {
+        val startedAt = SystemClock.elapsedRealtime()
+        return runCatching {
+            api.endSession(sessionId, apiKey)
+            Unit
+        }.onSuccess {
+            Log.i(
+                TAG,
+                "event=session_end_complete session_id=$sessionId " +
+                    "duration_ms=${SystemClock.elapsedRealtime() - startedAt}"
+            )
+        }.onFailure { error ->
+            Log.w(
+                TAG,
+                "event=session_end_failed session_id=$sessionId " +
+                    "duration_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "error_code=${error::class.java.simpleName}",
+                error
+            )
+        }
     }
 
     companion object {
@@ -172,8 +256,15 @@ internal class RetrofitMahjongCloudService(
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
                 .create(MahjongApiService::class.java)
-            return RetrofitMahjongCloudService(api, apiKey, config.recordingMode.wireValue)
+            return RetrofitMahjongCloudService(
+                api,
+                apiKey,
+                config.ruleProfileId,
+                config.recordingMode.wireValue
+            )
         }
+
+        private const val TAG = "MahjongGateway"
     }
 }
 
@@ -227,9 +318,9 @@ internal object DefaultMahjongFieldMapper : MahjongFieldMapper {
             canHu = response.suggestion?.canHu == true,
             jinzhangTiles = incomingTiles.take(5).map(::parseTile),
             pengTiles = response.handTiles.groupingBy { it }.eachCount()
-                .filterValues { it >= 2 }.keys.map(::parseTile),
+                .filterValues { it >= 2 }.keys.sortedWith(tileCodeComparator).map(::parseTile),
             gangTiles = response.handTiles.groupingBy { it }.eachCount()
-                .filterValues { it >= 3 }.keys.map(::parseTile),
+                .filterValues { it >= 3 }.keys.sortedWith(tileCodeComparator).map(::parseTile),
             shanten = response.suggestion?.suggestion?.tingpaiSteps
                 ?: response.suggestion?.tingpaiSteps,
             recommendationStrength = RecommendationStrength.fromConfidence(
@@ -242,6 +333,11 @@ internal object DefaultMahjongFieldMapper : MahjongFieldMapper {
         val normalized = raw.lowercase().replace("r", "")
         return tileMap[normalized] ?: raw
     }
+
+    private val tileCodeComparator = compareBy<String>(
+        { "mpsz".indexOf(it.lastOrNull() ?: 'z').let { index -> if (index < 0) 4 else index } },
+        { it.dropLast(1).toIntOrNull() ?: Int.MAX_VALUE }
+    )
 
     private fun tile(codePoint: Int): String = String(Character.toChars(codePoint))
 }

@@ -37,6 +37,23 @@ internal object Yuv420JpegEncoder {
         }
     }
 
+    fun medianLuma(image: Image, sampleStep: Int = LUMA_SAMPLE_STEP): Int? {
+        require(image.format == ImageFormat.YUV_420_888) { "Expected YUV_420_888 image" }
+        require(sampleStep > 0) { "sampleStep must be positive" }
+        val plane = image.planes.firstOrNull()?.let {
+            YuvPlaneBuffer(it.buffer, it.rowStride, it.pixelStride)
+        } ?: return null
+        val samples = ArrayList<Int>((image.width / sampleStep) * (image.height / sampleStep))
+        for (row in 0 until image.height step sampleStep) {
+            for (column in 0 until image.width step sampleStep) {
+                samples += readPlaneByte(plane, row, column).toInt() and 0xFF
+            }
+        }
+        if (samples.isEmpty()) return null
+        samples.sort()
+        return samples[samples.size / 2]
+    }
+
     private fun packNv21(
         width: Int,
         height: Int,
@@ -83,4 +100,6 @@ internal object Yuv420JpegEncoder {
 
     private fun readPlaneByte(plane: YuvPlaneBuffer, row: Int, column: Int): Byte =
         plane.buffer.get(plane.buffer.position() + row * plane.rowStride + column * plane.pixelStride)
+
+    private const val LUMA_SAMPLE_STEP = 16
 }

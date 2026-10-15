@@ -48,6 +48,7 @@ data class MahjongScenePayload(
 ) : ScenePayload {
     companion object {
         const val RENDERER_KEY = "mahjong.result.v1"
+        val EMPTY = MahjongScenePayload(emptyList(), emptyList(), "")
     }
 }
 
@@ -93,6 +94,7 @@ data class MahjongSceneConfig(
     val serverBaseUrl: String = DEFAULT_SERVER_BASE_URL,
     val serviceMode: MahjongServiceMode = MahjongServiceMode.CLOUD,
     val recordingMode: MahjongRecordingMode = MahjongRecordingMode.NORMAL,
+    val ruleProfileId: String = DEFAULT_RULE_PROFILE_ID,
     val captureIntervalMillis: Long = DEFAULT_CAPTURE_INTERVAL_MILLIS,
     val captureJitterMillis: Long = DEFAULT_CAPTURE_JITTER_MILLIS,
     val startupJitterMillis: Long = DEFAULT_STARTUP_JITTER_MILLIS,
@@ -106,6 +108,7 @@ data class MahjongSceneConfig(
 ) : SceneConfig {
     init {
         require(serverBaseUrl.isNotBlank()) { "serverBaseUrl must not be blank" }
+        require(ruleProfileId.isNotBlank()) { "ruleProfileId must not be blank" }
         require(captureIntervalMillis > 0) { "captureIntervalMillis must be positive" }
         require(captureJitterMillis >= 0) { "captureJitterMillis must not be negative" }
         require(startupJitterMillis >= 0) { "startupJitterMillis must not be negative" }
@@ -123,6 +126,7 @@ data class MahjongSceneConfig(
         const val DEFAULT_STARTUP_JITTER_MILLIS = 2_000L
         const val DEFAULT_SOURCE_FRAMES_PER_SECOND = 15
         const val DEFAULT_REQUEST_TIMEOUT_MILLIS = 30_000L
+        const val DEFAULT_RULE_PROFILE_ID = "guangdong_mvp_v1"
         const val LOCAL_CREDENTIAL_ID = "mahjong.local"
         const val CLOUD_CREDENTIAL_ID = "mahjong.cloud"
     }
@@ -131,17 +135,48 @@ data class MahjongSceneConfig(
 /** 麻将业务结果渲染器。 */
 class MahjongRenderer : SceneRenderer {
     override val rendererKey: String = MahjongScenePayload.RENDERER_KEY
+    private val rootsLock = Any()
     private val roots = mutableListOf<WeakReference<MahjongHudView>>()
+    @Volatile
+    private var diagnosticWarning: String? = null
+    @Volatile
+    private var noticeMessage: String? = null
 
     override fun render(container: ViewGroup, content: SceneContent) {
         require(content.rendererKey == rendererKey) { "Unsupported renderer key" }
         val payload = content.scenePayload as? MahjongScenePayload
             ?: error("Unsupported Mahjong payload")
-        ensureRoot(container).render(payload)
+        ensureRoot(container).also {
+            it.render(payload)
+            it.renderDiagnosticWarning(diagnosticWarning)
+            it.renderNotice(noticeMessage)
+        }
     }
 
     override fun clear() {
-        activeRoots().forEach { it.render(MahjongScenePayload(emptyList(), emptyList(), "")) }
+        prepare(MahjongServiceMode.CLOUD)
+    }
+
+    fun prepare(serviceMode: MahjongServiceMode) {
+        diagnosticWarning = null
+        noticeMessage = null
+        activeRoots().forEach { root ->
+            root.post {
+                root.render(MahjongScenePayload.EMPTY.copy(serviceMode = serviceMode))
+                root.renderDiagnosticWarning(null)
+                root.renderNotice(null)
+            }
+        }
+    }
+
+    fun renderDiagnosticWarning(message: String?) {
+        diagnosticWarning = message
+        activeRoots().forEach { root -> root.post { root.renderDiagnosticWarning(message) } }
+    }
+
+    fun renderNotice(message: String?) {
+        noticeMessage = message
+        activeRoots().forEach { root -> root.post { root.renderNotice(message) } }
     }
 
     private fun ensureRoot(container: ViewGroup): MahjongHudView {
@@ -150,22 +185,23 @@ class MahjongRenderer : SceneRenderer {
         return (LayoutInflater.from(container.context)
             .inflate(R.layout.view_mahjong_scene, container, false) as MahjongHudView).also {
             container.addView(it)
-            roots.add(WeakReference(it))
+            synchronized(rootsLock) { roots.add(WeakReference(it)) }
         }
     }
 
-    private fun activeRoots(): List<MahjongHudView> {
+    private fun activeRoots(): List<MahjongHudView> = synchronized(rootsLock) {
         val active = mutableListOf<MahjongHudView>()
         val iterator = roots.iterator()
         while (iterator.hasNext()) {
             iterator.next().get()?.let(active::add) ?: iterator.remove()
         }
-        return active
+        active
     }
 }
 
 /** 麻将场景入口：创建私有启动流程、Renderer 和单局业务 Session。 */
 class MahjongSceneProvider : SceneLaunchProvider {
+    private val renderer = MahjongRenderer()
     override val sceneId: String = "mahjong"
     override val sceneName: String = "麻将助手"
     override val version: String = "1.0.0"
@@ -173,14 +209,14 @@ class MahjongSceneProvider : SceneLaunchProvider {
         listOf(CapabilityType.CAMERA, CapabilityType.INPUT)
     override fun createSceneConfig(): SceneConfig = MahjongSceneConfig()
 
-    override fun createRenderer(): SceneRenderer = MahjongRenderer()
+    override fun createRenderer(): SceneRenderer = renderer
 
     override fun createLaunchController(): SceneLaunchController = MahjongLaunchController()
 
     override fun createSession(sceneContext: SceneContext): Session {
         val config = sceneContext.config as? MahjongSceneConfig
             ?: error("MahjongSceneConfig is required")
-        return MahjongSession(sceneId, sceneContext, config)
+        return MahjongSession(sceneId, sceneContext, config, renderer)
     }
 }
 
@@ -188,7 +224,8 @@ class MahjongSceneProvider : SceneLaunchProvider {
 private class MahjongSession(
     private val sceneId: String,
     private val sceneContext: SceneContext,
-    private val config: MahjongSceneConfig
+    private val config: MahjongSceneConfig,
+    private val renderer: MahjongRenderer
 ) : Session {
     override val frameStreamConfig = FrameStreamConfig(
         sourceFramesPerSecond = config.sourceFramesPerSecond,
@@ -200,9 +237,13 @@ private class MahjongSession(
     private var frameController: FrameController? = null
     private var service: RetrofitMahjongCloudService? = null
     private var cloudSessionId: String? = null
+    private val resultStabilizer = MahjongResultStabilizer()
+    private val diagnosticStabilizer = MahjongDiagnosticStabilizer()
+    private val captureGuidance = MahjongCaptureGuidance()
 
     override suspend fun start(frameController: FrameController) {
         this.frameController = frameController
+        renderer.prepare(config.serviceMode)
         inputJob = inputScope.launch {
             sceneContext.inputActions.collect { action ->
                 when (action) {
@@ -240,15 +281,23 @@ private class MahjongSession(
         val activeSessionId = checkNotNull(cloudSessionId) { "Mahjong session is not started" }
         val mapper: MahjongFieldMapper = DefaultMahjongFieldMapper
         return try {
+            renderGuidance(captureGuidance.onFrameReady(frame))
             activeService.prepareFrame(frame.capturedAtMillis, frame.imageRotationDegrees)
             val cloudResult = activeService.submitImage(activeSessionId, frame.file.readBytes())
                 .getOrElse { throw it }
             val payload = mapper.map(cloudResult).copy(serviceMode = config.serviceMode)
             val response = cloudResult as MahjongAnalyzeResult
-            response.diagnosticCode?.let {
-                sceneContext.reportDiagnostic(it, response.diagnosticMessage())
+            diagnosticStabilizer.evaluate(response.diagnosticCode)?.let { update ->
+                val message = update.code?.let {
+                    response.copy(diagnosticCode = it).diagnosticMessage()
+                }
+                renderer.renderDiagnosticWarning(message)
+                if (update.code != null) {
+                    sceneContext.reportDiagnostic(update.code, message.orEmpty())
+                }
             }
-            SceneResult(
+            renderGuidance(captureGuidance.onResult(response))
+            val result = SceneResult(
                 sceneId = sceneId,
                 sessionId = sceneContext.sessionId,
                 sequenceId = sequenceId,
@@ -261,6 +310,10 @@ private class MahjongSession(
                 ),
                 content = SceneContent(MahjongScenePayload.RENDERER_KEY, payload)
             )
+            when (resultStabilizer.evaluate(response, result)) {
+                MahjongResultStabilizer.Decision.PUBLISH -> result
+                MahjongResultStabilizer.Decision.HOLD -> null
+            }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -280,6 +333,8 @@ private class MahjongSession(
         inputScope.cancel()
         frameController?.cancelScheduledCapture()
         frameController = null
+        renderGuidance(captureGuidance.reset())
+        renderer.renderDiagnosticWarning(null)
         val activeService = service
         val activeSessionId = cloudSessionId
         service = null
@@ -293,6 +348,14 @@ private class MahjongSession(
                     recoverable = true
                 )
             }
+        }
+    }
+
+    private fun renderGuidance(update: MahjongGuidanceUpdate?) {
+        when (update) {
+            is MahjongGuidanceUpdate.Show -> renderer.renderNotice(update.message)
+            MahjongGuidanceUpdate.Dismiss -> renderer.renderNotice(null)
+            null -> Unit
         }
     }
 
