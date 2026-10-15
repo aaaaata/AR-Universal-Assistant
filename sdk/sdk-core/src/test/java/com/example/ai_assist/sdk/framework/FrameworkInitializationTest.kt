@@ -82,8 +82,8 @@ private object AlternateSdkConfig : SdkConfig
 
 private class EmptyCameraScheduler : CameraScheduler {
     override fun frames(
-        intervalMillis: Long,
-        cameraConfig: CapabilityConfig
+        streamConfig: FrameStreamConfig,
+        frameSelector: (frameAtElapsedMillis: Long) -> Boolean
     ): Flow<Frame> = emptyFlow()
 }
 

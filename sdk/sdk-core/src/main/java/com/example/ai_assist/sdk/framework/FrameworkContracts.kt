@@ -62,23 +62,42 @@ enum class InputAction {
 data class Frame(
     val file: File,
     val imageRotationDegrees: Int,
-    val capturedAtMillis: Long
+    val capturedAtMillis: Long,
+    /** 单调时钟时间，仅用于会话内安排后续取帧，不用于网络时间戳。 */
+    val selectedAtElapsedMillis: Long
 )
 
-/** Core 运行帧流所需的场景参数。 */
+/** Core 持续运行相机流所需的场景参数。业务取帧时机由 [FrameController] 决定。 */
 data class FrameStreamConfig(
-    val intervalMillis: Long,
+    val sourceFramesPerSecond: Int,
     val cameraConfig: CapabilityConfig
 ) {
     init {
-        require(intervalMillis > 0) { "intervalMillis must be positive" }
+        require(sourceFramesPerSecond > 0) { "sourceFramesPerSecond must be positive" }
     }
+}
+
+/**
+ * 场景的受控取帧入口。
+ *
+ * 每个会话最多保留一个待执行计划；新的 schedule 调用替换旧计划。计划只表达场景意图，
+ * Core 仍会执行单帧 in-flight、会话状态和相机资源门禁。
+ */
+interface FrameController {
+    /** 从当前单调时钟起，最早在 [delayMillis] 后选择下一张业务帧。 */
+    fun scheduleCaptureAfter(delayMillis: Long = 0L)
+
+    /** 最早在指定单调时钟时刻选择下一张业务帧。 */
+    fun scheduleCaptureAt(notBeforeElapsedMillis: Long)
+
+    /** 取消尚未执行的取帧计划；不会中断当前正在处理的帧。 */
+    fun cancelScheduledCapture()
 }
 
 /** 单次场景会话。场景管理业务会话，Core 的 SessionManager 管理帧流。 */
 interface Session {
     val frameStreamConfig: FrameStreamConfig
-    suspend fun start()
+    suspend fun start(frameController: FrameController)
     suspend fun processFrame(frame: Frame, sequenceId: Long): SceneResult?
     suspend fun close()
 }
@@ -157,11 +176,14 @@ sealed interface SdkEvent {
 }
 
 /**
- * 相机调度占位。
- * 默认 1 秒一帧；上一帧未完成时不发出新帧。场景不得自己打开或释放相机。
+ * Core 托管的持续相机流。只有 [frameSelector] 批准的原始帧会被编码为 [Frame]。
+ * 场景不得直接取得、打开或释放相机。
  */
 interface CameraScheduler {
-    fun frames(intervalMillis: Long, cameraConfig: CapabilityConfig): Flow<Frame>
+    fun frames(
+        streamConfig: FrameStreamConfig,
+        frameSelector: (frameAtElapsedMillis: Long) -> Boolean
+    ): Flow<Frame>
 }
 
 /** 活动场景可见的会话入口。填业务逻辑时只使用这些成员，不再改签名。 */

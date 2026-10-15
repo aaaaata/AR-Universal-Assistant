@@ -4,8 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
-import android.view.Surface
-import android.view.WindowManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -13,21 +11,26 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Range
+import android.util.Size
+import android.view.Surface
+import android.view.WindowManager
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.abs
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
+import kotlin.math.abs
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 data class AndroidCameraConfig(
@@ -36,7 +39,7 @@ data class AndroidCameraConfig(
     val jpegQuality: Byte = 90
 ) : CapabilityConfig
 
-/** Camera2 完整图片采集；Flow 的背压同时承担单帧 in-flight 门禁。 */
+/** Camera2 持续帧流；只把 Core 门禁批准的原始帧编码成业务 Frame。 */
 class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable {
     private val appContext = context.applicationContext
     private val cameraManager = appContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -44,29 +47,252 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
     private val imageThread = HandlerThread("cv-camera-images").apply { start() }
     private val imageHandler = Handler(imageThread.looper)
     private val lock = Any()
+    private val isEncoding = AtomicBoolean(false)
+    private var generation = 0L
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
 
-    override fun frames(intervalMillis: Long, cameraConfig: CapabilityConfig): Flow<Frame> = flow {
-        require(intervalMillis > 0) { "intervalMillis must be positive" }
-        val config = cameraConfig as? AndroidCameraConfig ?: AndroidCameraConfig()
+    override fun frames(
+        streamConfig: FrameStreamConfig,
+        frameSelector: (frameAtElapsedMillis: Long) -> Boolean
+    ): Flow<Frame> = callbackFlow {
+        val config = streamConfig.cameraConfig as? AndroidCameraConfig ?: AndroidCameraConfig()
         val cameraId = cameraManager.cameraIdList.firstOrNull()
             ?: error("No camera is available")
         val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        val requestGeneration = synchronized(lock) {
+            closeCameraLocked()
+            generation += 1
+            generation
+        }
+        openContinuousStream(
+            cameraId = cameraId,
+            characteristics = characteristics,
+            config = config,
+            sourceFramesPerSecond = streamConfig.sourceFramesPerSecond,
+            requestGeneration = requestGeneration,
+            frameSelector = frameSelector,
+            onFrame = { frame ->
+                if (trySend(frame).isFailure) frame.file.delete()
+            },
+            onError = { error -> close(error) }
+        )
+        awaitClose { closeCamera() }
+    }
+
+    private suspend fun openContinuousStream(
+        cameraId: String,
+        characteristics: CameraCharacteristics,
+        config: AndroidCameraConfig,
+        sourceFramesPerSecond: Int,
+        requestGeneration: Long,
+        frameSelector: (Long) -> Boolean,
+        onFrame: (Frame) -> Unit,
+        onError: (Throwable) -> Unit
+    ) {
+        check(appContext.checkSelfPermission(Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED) { "Camera permission is not granted" }
+        val camera = openCamera(cameraId, onError)
+        val output = selectOutput(characteristics, config)
         val jpegOrientation = jpegRotationDegrees(characteristics)
-        open(cameraId, config)
-        try {
-            while (currentCoroutineContext().isActive) {
-                val startedAt = System.currentTimeMillis()
-                emit(capture(config, jpegOrientation))
-                val elapsed = System.currentTimeMillis() - startedAt
-                delay((intervalMillis - elapsed).coerceAtLeast(0L))
+        val reader = ImageReader.newInstance(
+            output.size.width,
+            output.size.height,
+            output.format,
+            MAX_IMAGES
+        )
+        reader.setOnImageAvailableListener({ source ->
+            handleAvailableImage(
+                source = source,
+                outputFormat = output.format,
+                jpegQuality = config.jpegQuality,
+                jpegOrientation = jpegOrientation,
+                requestGeneration = requestGeneration,
+                frameSelector = frameSelector,
+                onFrame = onFrame,
+                onError = onError
+            )
+        }, imageHandler)
+        val session = createSession(camera, reader)
+        val fpsRange = selectFpsRange(characteristics, sourceFramesPerSecond)
+        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(reader.surface)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            fpsRange?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+            if (output.format == ImageFormat.JPEG) {
+                set(CaptureRequest.JPEG_QUALITY, config.jpegQuality)
+                set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
             }
-        } finally {
-            closeCamera()
+        }.build()
+        synchronized(lock) {
+            if (generation != requestGeneration) {
+                session.close()
+                reader.close()
+                camera.close()
+                return
+            }
+            cameraDevice = camera
+            imageReader = reader
+            captureSession = session
+        }
+        session.setRepeatingRequest(request, null, imageHandler)
+    }
+
+    private suspend fun openCamera(
+        cameraId: String,
+        onRuntimeError: (Throwable) -> Unit
+    ): CameraDevice =
+        suspendCancellableCoroutine { continuation ->
+            cameraManager.openCamera(cameraId, executor, object : CameraDevice.StateCallback() {
+                override fun onOpened(value: CameraDevice) {
+                    if (continuation.isActive) continuation.resume(value) else value.close()
+                }
+
+                override fun onDisconnected(value: CameraDevice) {
+                    value.close()
+                    val error = IllegalStateException("Camera disconnected")
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(error)
+                    } else {
+                        onRuntimeError(error)
+                    }
+                }
+
+                override fun onError(value: CameraDevice, error: Int) {
+                    value.close()
+                    val cause = IllegalStateException("Camera error: $error")
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(cause)
+                    } else {
+                        onRuntimeError(cause)
+                    }
+                }
+            })
+        }
+
+    private suspend fun createSession(
+        camera: CameraDevice,
+        reader: ImageReader
+    ): CameraCaptureSession = suspendCancellableCoroutine { continuation ->
+        val sessionConfig = SessionConfiguration(
+            SessionConfiguration.SESSION_REGULAR,
+            listOf(OutputConfiguration(reader.surface)),
+            executor,
+            object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(value: CameraCaptureSession) {
+                    if (continuation.isActive) continuation.resume(value) else value.close()
+                }
+
+                override fun onConfigureFailed(value: CameraCaptureSession) {
+                    value.close()
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(
+                            IllegalStateException("Camera session configuration failed")
+                        )
+                    }
+                }
+            }
+        )
+        camera.createCaptureSession(sessionConfig)
+    }
+
+    private fun handleAvailableImage(
+        source: ImageReader,
+        outputFormat: Int,
+        jpegQuality: Byte,
+        jpegOrientation: Int,
+        requestGeneration: Long,
+        frameSelector: (Long) -> Boolean,
+        onFrame: (Frame) -> Unit,
+        onError: (Throwable) -> Unit
+    ) {
+        val image = runCatching { source.acquireLatestImage() }.getOrNull() ?: return
+        val selectedAtElapsedMillis = elapsedRealtimeMillis()
+        if (isEncoding.get() || !frameSelector(selectedAtElapsedMillis)) {
+            image.close()
+            return
+        }
+        if (!isEncoding.compareAndSet(false, true)) {
+            image.close()
+            return
+        }
+        executor.execute {
+            var outputFile: File? = null
+            try {
+                outputFile = File.createTempFile("cv-frame-", ".jpg", appContext.cacheDir)
+                val imageRotationDegrees = if (outputFormat == ImageFormat.YUV_420_888) {
+                    Yuv420JpegEncoder.writeJpeg(image, outputFile, jpegQuality)
+                    jpegOrientation
+                } else {
+                    writeHardwareJpeg(image, outputFile)
+                    JPEG_FRAME_ROTATION_DEGREES
+                }
+                if (synchronized(lock) { generation == requestGeneration }) {
+                    onFrame(
+                        Frame(
+                            file = outputFile,
+                            imageRotationDegrees = imageRotationDegrees,
+                            capturedAtMillis = System.currentTimeMillis(),
+                            selectedAtElapsedMillis = selectedAtElapsedMillis
+                        )
+                    )
+                } else {
+                    outputFile.delete()
+                }
+            } catch (error: Throwable) {
+                outputFile?.delete()
+                onError(error)
+            } finally {
+                image.close()
+                isEncoding.set(false)
+            }
         }
     }
+
+    private fun selectOutput(
+        characteristics: CameraCharacteristics,
+        config: AndroidCameraConfig
+    ): CameraOutput {
+        val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?: error("Camera stream configuration is unavailable")
+        val yuvSizes = streamMap.getOutputSizes(ImageFormat.YUV_420_888)
+        if (!yuvSizes.isNullOrEmpty()) {
+            return CameraOutput(
+                ImageFormat.YUV_420_888,
+                chooseOptimalSize(yuvSizes, config.width, config.height)
+            )
+        }
+        val jpegSizes = streamMap.getOutputSizes(ImageFormat.JPEG)
+        require(!jpegSizes.isNullOrEmpty()) { "Camera does not support YUV or JPEG output" }
+        return CameraOutput(
+            ImageFormat.JPEG,
+            chooseOptimalSize(jpegSizes, config.width, config.height)
+        )
+    }
+
+    private fun selectFpsRange(
+        characteristics: CameraCharacteristics,
+        requestedFps: Int
+    ): Range<Int>? {
+        val ranges = characteristics.get(
+            CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
+        ).orEmpty()
+        return ranges.filter { requestedFps in it.lower..it.upper }
+            .minByOrNull { it.upper - it.lower }
+            ?: ranges.minByOrNull {
+                minOf(abs(it.lower - requestedFps), abs(it.upper - requestedFps))
+            }
+    }
+
+    private fun chooseOptimalSize(
+        choices: Array<out Size>,
+        targetWidth: Int,
+        targetHeight: Int
+    ): Size = choices.minByOrNull {
+        abs(it.width - targetWidth) + abs(it.height - targetHeight)
+    } ?: Size(targetWidth, targetHeight)
 
     private fun jpegRotationDegrees(characteristics: CameraCharacteristics): Int {
         val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
@@ -86,127 +312,41 @@ class AndroidCameraScheduler(context: Context) : CameraScheduler, AutoCloseable 
         }
     }
 
-    private suspend fun open(cameraId: String, config: AndroidCameraConfig) {
-        check(appContext.checkSelfPermission(Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED) { "Camera permission is not granted" }
-        val camera = suspendCancellableCoroutine<CameraDevice> { continuation ->
-            cameraManager.openCamera(cameraId, executor, object : CameraDevice.StateCallback() {
-                override fun onOpened(value: CameraDevice) {
-                    if (continuation.isActive) continuation.resume(value) else value.close()
-                }
-
-                override fun onDisconnected(value: CameraDevice) {
-                    value.close()
-                    if (continuation.isActive) {
-                        continuation.resumeWithException(IllegalStateException("Camera disconnected"))
-                    }
-                }
-
-                override fun onError(value: CameraDevice, error: Int) {
-                    value.close()
-                    if (continuation.isActive) {
-                        continuation.resumeWithException(IllegalStateException("Camera error: $error"))
-                    }
-                }
-            })
-        }
-        val outputSize = cameraManager.getCameraCharacteristics(cameraId)
-            .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            ?.getOutputSizes(ImageFormat.JPEG)
-            ?.minByOrNull { abs(it.width - config.width) + abs(it.height - config.height) }
-            ?: error("Camera does not support JPEG output")
-        val reader = ImageReader.newInstance(outputSize.width, outputSize.height, ImageFormat.JPEG, 2)
-        val session = suspendCancellableCoroutine<CameraCaptureSession> { continuation ->
-            val sessionConfig = SessionConfiguration(
-                SessionConfiguration.SESSION_REGULAR,
-                listOf(OutputConfiguration(reader.surface)),
-                executor,
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(value: CameraCaptureSession) {
-                        if (continuation.isActive) continuation.resume(value) else value.close()
-                    }
-
-                    override fun onConfigureFailed(value: CameraCaptureSession) {
-                        value.close()
-                        if (continuation.isActive) {
-                            continuation.resumeWithException(
-                                IllegalStateException("Camera session configuration failed")
-                            )
-                        }
-                    }
-                }
-            )
-            camera.createCaptureSession(sessionConfig)
-        }
-        synchronized(lock) {
-            cameraDevice = camera
-            imageReader = reader
-            captureSession = session
-        }
+    private fun writeHardwareJpeg(image: Image, outputFile: File) {
+        val buffer = image.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining()).also(buffer::get)
+        FileOutputStream(outputFile).use { it.write(bytes) }
     }
-
-    private suspend fun capture(config: AndroidCameraConfig, jpegOrientation: Int): Frame =
-        suspendCancellableCoroutine { continuation ->
-            val camera = synchronized(lock) { cameraDevice } ?: run {
-                continuation.resumeWithException(IllegalStateException("Camera is closed"))
-                return@suspendCancellableCoroutine
-            }
-            val session = synchronized(lock) { captureSession } ?: run {
-                continuation.resumeWithException(IllegalStateException("Camera session is closed"))
-                return@suspendCancellableCoroutine
-            }
-            val reader = synchronized(lock) { imageReader } ?: run {
-                continuation.resumeWithException(IllegalStateException("Image reader is closed"))
-                return@suspendCancellableCoroutine
-            }
-            reader.setOnImageAvailableListener({ source ->
-                val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
-                try {
-                    val buffer = image.planes[0].buffer
-                    val bytes = ByteArray(buffer.remaining()).also(buffer::get)
-                    val file = File.createTempFile("cv-frame-", ".jpg", appContext.cacheDir)
-                    FileOutputStream(file).use { it.write(bytes) }
-                    if (continuation.isActive) {
-                        continuation.resume(
-                            Frame(file, JPEG_FRAME_ROTATION_DEGREES, System.currentTimeMillis())
-                        )
-                    } else {
-                        file.delete()
-                    }
-                } catch (error: Throwable) {
-                    if (continuation.isActive) continuation.resumeWithException(error)
-                } finally {
-                    image.close()
-                    reader.setOnImageAvailableListener(null, null)
-                }
-            }, imageHandler)
-            val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                addTarget(reader.surface)
-                set(CaptureRequest.JPEG_QUALITY, config.jpegQuality)
-                set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            }.build()
-            session.capture(request, null, null)
-            continuation.invokeOnCancellation { reader.setOnImageAvailableListener(null, null) }
-        }
 
     override fun close() {
         closeCamera()
+        executor.shutdown()
+        imageThread.quitSafely()
     }
 
     private fun closeCamera() {
         synchronized(lock) {
-            captureSession?.close()
-            captureSession = null
-            cameraDevice?.close()
-            cameraDevice = null
-            imageReader?.close()
-            imageReader = null
+            generation += 1
+            closeCameraLocked()
         }
     }
 
+    private fun closeCameraLocked() {
+        captureSession?.close()
+        captureSession = null
+        cameraDevice?.close()
+        cameraDevice = null
+        imageReader?.close()
+        imageReader = null
+    }
+
+    private data class CameraOutput(val format: Int, val size: Size)
+
     private companion object {
-        // JPEG_ORIENTATION is embedded by Camera2, so the uploaded encoded frame needs no rotation.
+        const val MAX_IMAGES = 4
         const val JPEG_FRAME_ROTATION_DEGREES = 0
+
+        fun elapsedRealtimeMillis(): Long =
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
     }
 }

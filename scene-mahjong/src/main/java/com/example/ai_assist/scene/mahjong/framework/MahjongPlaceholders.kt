@@ -8,6 +8,7 @@ import com.example.ai_assist.sdk.framework.AndroidCameraConfig
 import com.example.ai_assist.sdk.framework.CapabilityType
 import com.example.ai_assist.sdk.framework.CapabilityConfig
 import com.example.ai_assist.sdk.framework.Frame
+import com.example.ai_assist.sdk.framework.FrameController
 import com.example.ai_assist.sdk.framework.FrameStreamConfig
 import com.example.ai_assist.sdk.framework.InputAction
 import com.example.ai_assist.sdk.framework.SceneConfig
@@ -29,6 +30,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 /** 麻将 HUD 使用的场景结果。 */
 data class MahjongScenePayload(
@@ -92,6 +94,9 @@ data class MahjongSceneConfig(
     val serviceMode: MahjongServiceMode = MahjongServiceMode.CLOUD,
     val recordingMode: MahjongRecordingMode = MahjongRecordingMode.NORMAL,
     val captureIntervalMillis: Long = DEFAULT_CAPTURE_INTERVAL_MILLIS,
+    val captureJitterMillis: Long = DEFAULT_CAPTURE_JITTER_MILLIS,
+    val startupJitterMillis: Long = DEFAULT_STARTUP_JITTER_MILLIS,
+    val sourceFramesPerSecond: Int = DEFAULT_SOURCE_FRAMES_PER_SECOND,
     val requestTimeoutMillis: Long = DEFAULT_REQUEST_TIMEOUT_MILLIS,
     val cameraConfig: CapabilityConfig = AndroidCameraConfig(),
     override val credentialId: String = when (serviceMode) {
@@ -102,6 +107,9 @@ data class MahjongSceneConfig(
     init {
         require(serverBaseUrl.isNotBlank()) { "serverBaseUrl must not be blank" }
         require(captureIntervalMillis > 0) { "captureIntervalMillis must be positive" }
+        require(captureJitterMillis >= 0) { "captureJitterMillis must not be negative" }
+        require(startupJitterMillis >= 0) { "startupJitterMillis must not be negative" }
+        require(sourceFramesPerSecond > 0) { "sourceFramesPerSecond must be positive" }
         require(requestTimeoutMillis > 0) { "requestTimeoutMillis must be positive" }
     }
 
@@ -110,7 +118,10 @@ data class MahjongSceneConfig(
 
     companion object {
         const val DEFAULT_SERVER_BASE_URL = "http://127.0.0.1:8000/"
-        const val DEFAULT_CAPTURE_INTERVAL_MILLIS = 1_000L
+        const val DEFAULT_CAPTURE_INTERVAL_MILLIS = 2_000L
+        const val DEFAULT_CAPTURE_JITTER_MILLIS = 1_500L
+        const val DEFAULT_STARTUP_JITTER_MILLIS = 2_000L
+        const val DEFAULT_SOURCE_FRAMES_PER_SECOND = 15
         const val DEFAULT_REQUEST_TIMEOUT_MILLIS = 30_000L
         const val LOCAL_CREDENTIAL_ID = "mahjong.local"
         const val CLOUD_CREDENTIAL_ID = "mahjong.cloud"
@@ -173,23 +184,25 @@ class MahjongSceneProvider : SceneLaunchProvider {
     }
 }
 
-/** 单局麻将业务；Core 负责何时采帧，本类只处理一帧和云端麻将会话。 */
+/** 单局麻将业务；本类安排选帧时机，Core 管持续流、门禁和相机资源。 */
 private class MahjongSession(
     private val sceneId: String,
     private val sceneContext: SceneContext,
     private val config: MahjongSceneConfig
 ) : Session {
     override val frameStreamConfig = FrameStreamConfig(
-        intervalMillis = config.captureIntervalMillis,
+        sourceFramesPerSecond = config.sourceFramesPerSecond,
         cameraConfig = config.cameraConfig
     )
 
     private val inputScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var inputJob: Job? = null
+    private var frameController: FrameController? = null
     private var service: RetrofitMahjongCloudService? = null
     private var cloudSessionId: String? = null
 
-    override suspend fun start() {
+    override suspend fun start(frameController: FrameController) {
+        this.frameController = frameController
         inputJob = inputScope.launch {
             sceneContext.inputActions.collect { action ->
                 when (action) {
@@ -214,9 +227,15 @@ private class MahjongSession(
             throw error
         }
         Log.i(TAG, "Cloud Mahjong session created: ${cloudSessionId.orEmpty()}")
+        frameController.scheduleCaptureAfter(randomDelay(config.startupJitterMillis))
     }
 
     override suspend fun processFrame(frame: Frame, sequenceId: Long): SceneResult? {
+        frameController?.scheduleCaptureAt(
+            frame.selectedAtElapsedMillis +
+                config.captureIntervalMillis +
+                randomDelay(config.captureJitterMillis)
+        )
         val activeService = checkNotNull(service) { "Mahjong service is not started" }
         val activeSessionId = checkNotNull(cloudSessionId) { "Mahjong session is not started" }
         val mapper: MahjongFieldMapper = DefaultMahjongFieldMapper
@@ -259,6 +278,8 @@ private class MahjongSession(
         inputJob?.cancel()
         inputJob = null
         inputScope.cancel()
+        frameController?.cancelScheduledCapture()
+        frameController = null
         val activeService = service
         val activeSessionId = cloudSessionId
         service = null
@@ -277,5 +298,8 @@ private class MahjongSession(
 
     private companion object {
         const val TAG = "MahjongScene"
+
+        fun randomDelay(maxMillis: Long): Long =
+            if (maxMillis == 0L) 0L else Random.nextLong(maxMillis + 1L)
     }
 }

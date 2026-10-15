@@ -2,6 +2,7 @@ package com.example.ai_assist.sdk.framework
 
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -136,7 +137,61 @@ class DefaultSceneContext(
     }
 }
 
-/** Core 独占 Frame Flow；顺序 collect 自然保证上一帧处理完成后才采下一帧。 */
+/** 单会话取帧控制器：只保留一个计划，并阻止多张业务帧同时处理中。 */
+internal class DefaultFrameController(
+    private val elapsedRealtimeMillis: () -> Long = {
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
+    }
+) : FrameController {
+    private var scheduledAtElapsedMillis: Long? = null
+    private var frameInFlight = false
+    private var closed = false
+
+    @Synchronized
+    override fun scheduleCaptureAfter(delayMillis: Long) {
+        check(!closed) { "FrameController is closed" }
+        require(delayMillis >= 0L) { "delayMillis must not be negative" }
+        scheduledAtElapsedMillis = elapsedRealtimeMillis() + delayMillis
+    }
+
+    @Synchronized
+    override fun scheduleCaptureAt(notBeforeElapsedMillis: Long) {
+        check(!closed) { "FrameController is closed" }
+        require(notBeforeElapsedMillis >= 0L) {
+            "notBeforeElapsedMillis must not be negative"
+        }
+        scheduledAtElapsedMillis = notBeforeElapsedMillis
+    }
+
+    @Synchronized
+    override fun cancelScheduledCapture() {
+        scheduledAtElapsedMillis = null
+    }
+
+    @Synchronized
+    fun tryBeginFrame(frameAtElapsedMillis: Long): Boolean {
+        if (closed) return false
+        val scheduledAt = scheduledAtElapsedMillis ?: return false
+        if (frameInFlight || frameAtElapsedMillis < scheduledAt) return false
+        frameInFlight = true
+        scheduledAtElapsedMillis = null
+        return true
+    }
+
+    @Synchronized
+    fun completeFrame() {
+        frameInFlight = false
+    }
+
+    @Synchronized
+    fun close() {
+        closed = true
+        scheduledAtElapsedMillis = null
+        frameInFlight = false
+    }
+}
+
+/** Core 独占持续 Frame Flow；场景通过 FrameController 编排取帧，Core 执行门禁。 */
 class DefaultSessionManager(
     private val cameraScheduler: CameraScheduler
 ) : SessionManager {
@@ -147,13 +202,13 @@ class DefaultSessionManager(
         onResult: suspend (SceneResult) -> Unit
     ) {
         var sequenceId = 0L
+        val frameController = DefaultFrameController()
         try {
-            session.start()
+            session.start(frameController)
             onStarted()
-            val frameConfig = session.frameStreamConfig
             cameraScheduler.frames(
-                intervalMillis = frameConfig.intervalMillis,
-                cameraConfig = frameConfig.cameraConfig
+                streamConfig = session.frameStreamConfig,
+                frameSelector = frameController::tryBeginFrame
             ).collect { frame ->
                 sequenceId += 1
                 try {
@@ -165,9 +220,11 @@ class DefaultSessionManager(
                             "Unable to delete processed frame"
                         )
                     }
+                    frameController.completeFrame()
                 }
             }
         } finally {
+            frameController.close()
             withContext(NonCancellable) { session.close() }
         }
     }
@@ -177,9 +234,7 @@ class DefaultSessionManager(
 class FrameworkRuntime(
     private val cameraScheduler: CameraScheduler,
     private val credentialProvider: CredentialProvider = CredentialProvider { _, _ -> null },
-    private val resourceManager: ResourceManager = DefaultResourceManager {
-        (cameraScheduler as? AutoCloseable)?.close()
-    },
+    private val resourceManager: ResourceManager = DefaultResourceManager(),
     private val stateMachine: DefaultStateMachine = DefaultStateMachine(),
     private val eventDispatcher: DefaultEventDispatcher = DefaultEventDispatcher(),
     private val sessionManager: SessionManager = DefaultSessionManager(cameraScheduler)
@@ -296,6 +351,7 @@ class FrameworkRuntime(
         stopScene()
         scope.cancel()
         resourceManager.releaseAll()
+        (cameraScheduler as? AutoCloseable)?.close()
     }
 
     private suspend fun runScene(active: ActiveScene, context: DefaultSceneContext) {

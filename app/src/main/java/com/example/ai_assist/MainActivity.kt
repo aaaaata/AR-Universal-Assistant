@@ -335,8 +335,11 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
         pendingPermissionAction = null
         closeLaunchController()
         sceneJob?.cancel()
-        if (::core.isInitialized) core.close()
-        if (::cameraScheduler.isInitialized) cameraScheduler.close()
+        if (::core.isInitialized) {
+            core.close()
+        } else if (::cameraScheduler.isInitialized) {
+            cameraScheduler.close()
+        }
         super.onDestroy()
     }
 

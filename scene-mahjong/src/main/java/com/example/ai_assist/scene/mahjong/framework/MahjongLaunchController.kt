@@ -330,8 +330,7 @@ internal class MahjongLaunchController : SceneLaunchController {
             MahjongSceneConfig(
                 serverBaseUrl = connection.serverUrl,
                 serviceMode = selectedServiceMode,
-                recordingMode = recordingMode,
-                captureIntervalMillis = 1_000L / connection.fps.coerceIn(1, 5)
+                recordingMode = recordingMode
             )
         )
     }
