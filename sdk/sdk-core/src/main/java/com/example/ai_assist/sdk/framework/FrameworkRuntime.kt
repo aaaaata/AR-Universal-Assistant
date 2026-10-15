@@ -191,15 +191,21 @@ class FrameworkRuntime(
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     private var activeScene: ActiveScene? = null
+    private var initializedConfig: SdkConfig? = null
 
     val state: StateFlow<SdkState> = stateMachine.state
     val events: SharedFlow<SdkEvent> = eventDispatcher.events
 
     @Synchronized
-    override fun initialize() {
+    override fun initialize(config: SdkConfig) {
         when (stateMachine.state.value) {
-            SdkState.UNINITIALIZED -> stateMachine.transition(SdkState.READY)
-            SdkState.READY -> Unit
+            SdkState.UNINITIALIZED -> {
+                initializedConfig = config
+                stateMachine.transition(SdkState.READY)
+            }
+            SdkState.READY -> check(initializedConfig == config) {
+                "SDK is already initialized with a different config"
+            }
             else -> error("Cannot initialize SDK while state is ${stateMachine.state.value}")
         }
     }

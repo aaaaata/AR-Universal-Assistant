@@ -13,8 +13,8 @@ class FrameworkInitializationTest {
         val runtime = FrameworkRuntime(EmptyCameraScheduler())
 
         assertEquals(SdkState.UNINITIALIZED, runtime.getCurrentState())
-        runtime.initialize()
-        runtime.initialize()
+        runtime.initialize(DefaultSdkConfig)
+        runtime.initialize(DefaultSdkConfig)
 
         assertEquals(SdkState.READY, runtime.getCurrentState())
         runtime.close()
@@ -39,7 +39,7 @@ class FrameworkInitializationTest {
             stateMachine = DefaultStateMachine(SdkState.STARTING)
         )
 
-        val error = runCatching(runtime::initialize).exceptionOrNull()
+        val error = runCatching { runtime.initialize(DefaultSdkConfig) }.exceptionOrNull()
 
         assertTrue(error is IllegalStateException)
         assertTrue(error?.message.orEmpty().contains("Cannot initialize SDK"))
@@ -54,7 +54,7 @@ class FrameworkInitializationTest {
             resourceManager = resources
         )
         runtime.registerScene(FakeProvider(listOf(CapabilityType.INPUT)))
-        runtime.initialize()
+        runtime.initialize(DefaultSdkConfig)
 
         val error = runCatching { runtime.startScene(FakeProvider.ID) }.exceptionOrNull()
 
@@ -63,7 +63,22 @@ class FrameworkInitializationTest {
         assertEquals(SdkState.READY, runtime.getCurrentState())
         runtime.close()
     }
+
+    @Test
+    fun initializeWithDifferentConfigAfterReadyIsRejected() {
+        val runtime = FrameworkRuntime(EmptyCameraScheduler())
+        runtime.initialize(DefaultSdkConfig)
+
+        val error = runCatching { runtime.initialize(AlternateSdkConfig) }.exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertTrue(error?.message.orEmpty().contains("different config"))
+        assertEquals(SdkState.READY, runtime.getCurrentState())
+        runtime.close()
+    }
 }
+
+private object AlternateSdkConfig : SdkConfig
 
 private class EmptyCameraScheduler : CameraScheduler {
     override fun frames(

@@ -23,8 +23,11 @@ enum class CapabilityType {
     INPUT
 }
 
-/** SDK 全局配置占位。日志、缓存和默认超时以后在这里填。 */
+/** SDK 全局配置。日志、缓存和默认超时以后在这里填。 */
 interface SdkConfig
+
+/** 当前没有公共配置字段时使用的显式默认值。 */
+object DefaultSdkConfig : SdkConfig
 
 /** 场景配置。业务字段由场景定义，Core 只读取可选凭据标识。 */
 interface SceneConfig {
@@ -243,8 +246,8 @@ fun interface SceneModule {
 
 /** sdk-core 入口。场景通过它注册和启动。 */
 interface CvGameCore {
-    /** UNINITIALIZED -> READY；READY 状态重复调用保持幂等。 */
-    fun initialize()
+    /** UNINITIALIZED -> READY；同一配置在 READY 状态下重复调用保持幂等。 */
+    fun initialize(config: SdkConfig)
     fun registerScene(provider: SceneProvider)
     fun unregisterScene(sceneId: String)
     fun getScenes(): List<SceneProvider>

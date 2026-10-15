@@ -16,6 +16,7 @@ import com.example.ai_assist.framework.registerScenes
 import com.example.ai_assist.sdk.framework.AndroidCameraScheduler
 import com.example.ai_assist.sdk.framework.CapabilityType
 import com.example.ai_assist.sdk.framework.CredentialProvider
+import com.example.ai_assist.sdk.framework.DefaultSdkConfig
 import com.example.ai_assist.sdk.framework.FrameworkRuntime
 import com.example.ai_assist.sdk.framework.InputAction
 import com.example.ai_assist.sdk.framework.SceneConfig
@@ -74,7 +75,7 @@ class MainActivity : BaseMirrorActivity<ActivityMainBinding>() {
             }
         )
         registrations = registerScenes(core)
-        core.initialize()
+        core.initialize(DefaultSdkConfig)
         observeInput()
         showMenu()
     }
