@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black">
+
+    <TextView
+        android:id="@+id/selection_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="28dp"
+        android:text="连接方式选择"
+        android:textColor="@color/neon_green"
+        android:textSize="20sp"
+        android:textStyle="bold" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="114dp"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/left_button"
+            android:layout_width="118dp"
+            android:layout_height="114dp"
+            android:background="@drawable/bg_mahjong_mode_button"
+            android:textColor="@android:color/white"
+            android:textSize="18sp" />
+
+        <Space
+            android:layout_width="52dp"
+            android:layout_height="1dp" />
+
+        <Button
+            android:id="@+id/right_button"
+            android:layout_width="118dp"
+            android:layout_height="114dp"
+            android:background="@drawable/bg_mahjong_mode_button"
+            android:textColor="@android:color/white"
+            android:textSize="18sp" />
+    </LinearLayout>
+</FrameLayout>

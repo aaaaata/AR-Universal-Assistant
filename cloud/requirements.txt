@@ -1,0 +1,20 @@
+# Runtime dependencies for the new cloud/ MVP chain.
+fastapi>=0.100.0
+uvicorn>=0.20.0
+pillow
+numpy
+opencv-python-headless>=4.8.0
+qrcode[pil]>=7.4.2
+
+# Model runtimes.
+# ultralytics normally pulls torch/torchvision. If GPU/CUDA wheels need to be pinned,
+# install the matching PyTorch build before installing this requirements file.
+ultralytics
+onnxruntime
+
+# Mahjong rule calculation.
+mahjong
+
+# Local tests and request/monitor validation.
+pytest
+httpx

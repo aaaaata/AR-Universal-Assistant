@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <meta-data
+            android:name="com.example.ai_assist.sdk.scene_module.mahjong_guangdong"
+            android:value="com.example.ai_assist.scene.mahjong.scene.MahjongSceneModule" />
+    </application>
+</manifest>

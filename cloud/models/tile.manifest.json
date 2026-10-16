@@ -1,0 +1,9 @@
+{
+  "runtime": "ultralytics",
+  "model_path": "../../models/tile/combined_original_and_new_data_best.pt",
+  "model_version": "combined-original-and-new-data-best-v1",
+  "predict_args": {
+    "device": "cpu"
+  },
+  "class_mapping": {}
+}

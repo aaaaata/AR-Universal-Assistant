@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mahjong_user_hand" translatable="false">用户手牌</string>
+    <string name="mahjong_melded_tiles" translatable="false">副露</string>
+    <string name="mahjong_advice" translatable="false">操作建议</string>
+    <string name="mahjong_scroll_up" translatable="false">▲</string>
+    <string name="mahjong_scroll_down" translatable="false">▼</string>
+</resources>
